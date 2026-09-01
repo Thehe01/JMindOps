@@ -1,0 +1,107 @@
+server:
+  # 仅让 Tomcat 从受信任的内部代理解析转发头；直连请求继续使用 socket 地址。
+  forward-headers-strategy: native
+  tomcat:
+    remoteip:
+      remote-ip-header: X-Forwarded-For
+      protocol-header: X-Forwarded-Proto
+
+spring:
+  application:
+    name: jmindops
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://127.0.0.1:5432/jmindops}
+    username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+    driver-class-name: org.postgresql.Driver
+  flyway:
+    enabled: ${SPRING_FLYWAY_ENABLED:true}
+    locations: classpath:db/migration
+    baseline-on-migrate: ${SPRING_FLYWAY_BASELINE_ON_MIGRATE:true}
+    baseline-version: ${SPRING_FLYWAY_BASELINE_VERSION:0}
+    validate-on-migrate: true
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:127.0.0.1}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+      password: ${SPRING_DATA_REDIS_PASSWORD:}
+      database: ${SPRING_DATA_REDIS_DATABASE:0}
+      timeout: 3000ms
+  servlet:
+    multipart:
+      max-file-size: ${MAX_UPLOAD_FILE_SIZE:10MB}
+      max-request-size: ${MAX_UPLOAD_REQUEST_SIZE:10MB}
+  mail:
+    host: ${MAIL_HOST:smtp.qq.com}
+    port: ${MAIL_PORT:587}
+    username: ${MAIL_USERNAME:}
+    password: ${MAIL_PASSWORD:}
+    default-encoding: UTF-8
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+            required: true
+  ai:
+    deepseek:
+      api-key: ${DEEPSEEK_API_KEY:}
+      base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
+      chat:
+        options:
+          model: deepseek-chat
+    zhipuai:
+      api-key: ${ZHIPUAI_API_KEY:}
+      base-url: ${ZHIPUAI_BASE_URL:https://open.bigmodel.cn/api/paas}
+      chat:
+        options:
+          model: glm-4.6
+    google:
+      genai:
+        api-key: ${GOOGLE_GENAI_API_KEY:}
+        chat:
+          options:
+            model: gemini-2.5
+    mcp:
+      client:
+        enabled: ${MCP_CLIENT_ENABLED:false}
+        stdio:
+          connections:
+            filesystem-mcp:
+              command: ${MCP_FILESYSTEM_COMMAND:npx}
+              args:
+                - "-y"
+                - "@modelcontextprotocol/server-filesystem"
+                - ${MCP_FILESYSTEM_ROOT:./data/mcp-workspace}
+
+mybatis:
+  type-aliases-package: com.kama.jmindops.model.entity
+  mapper-locations: classpath:mapper/*.xml
+  type-handlers-package: com.kama.jmindops.typehandler
+
+document:
+  storage:
+    base-path: ${DOCUMENT_STORAGE_BASE_PATH:./data/documents}
+
+rag:
+  embedding:
+    base-url: ${RAG_EMBEDDING_BASE_URL:http://localhost:11434}
+    model: ${RAG_EMBEDDING_MODEL:bge-m3}
+    request-timeout-seconds: ${RAG_REQUEST_TIMEOUT_SECONDS:30}
+  reranker:
+    enabled: ${RAG_RERANKER_ENABLED:false}
+    model: ${RAG_RERANKER_MODEL:bge-reranker-large}
+
+app:
+  security:
+    jwt-secret: ${APP_JWT_SECRET:}
+    token-ttl-hours: ${APP_JWT_TTL_HOURS:1}
+  tools:
+    database:
+      enabled: ${DATABASE_TOOL_ENABLED:false}
+    email:
+      enabled: ${EMAIL_TOOL_ENABLED:false}
+  bootstrap-admin:
+    username: ${APP_BOOTSTRAP_ADMIN_USERNAME:}
+    password: ${APP_BOOTSTRAP_ADMIN_PASSWORD:}

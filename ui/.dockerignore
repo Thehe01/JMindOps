@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+.playwright-cli/
+output/
+.env
+.env.*
+!.env.example
+*.log
+.idea/
+.vscode/
+.git/
+.gitignore
+Dockerfile*

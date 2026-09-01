@@ -1,0 +1,33 @@
+# Environment files and runtime data may contain API keys, database passwords, or user documents.
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Build output and local IDE state
+**/node_modules/
+**/dist/
+**/target/
+**/data/
+.idea/
+.vscode/
+.fleet/
+*.iml
+*.pid
+output*.txt
+/--help
+
+# Logs and operating-system files
+*.log
+*.dumpstream
+.DS_Store
+
+# Local interview notes & private docs
+interview_qa.md
+walkthrough.md
+*debug*.txt
+mvn_debug.txt
+out*.txt
+

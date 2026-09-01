@@ -1,0 +1,14 @@
+spring:
+  flyway:
+    enabled: false
+  ai:
+    mcp:
+      client:
+        enabled: false
+
+app:
+  security:
+    jwt-secret: ${APP_JWT_SECRET:}
+  bootstrap-admin:
+    username: ""
+    password: ""

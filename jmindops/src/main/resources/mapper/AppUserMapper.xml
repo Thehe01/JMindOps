@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.kama.jmindops.mapper.AppUserMapper">
+    <resultMap id="AppUserMap" type="com.kama.jmindops.model.entity.AppUser">
+        <id property="id" column="id"/>
+        <result property="username" column="username"/>
+        <result property="passwordHash" column="password_hash"/>
+        <result property="role" column="role"/>
+        <result property="createdAt" column="created_at"/>
+    </resultMap>
+
+    <insert id="insert" parameterType="com.kama.jmindops.model.entity.AppUser">
+        INSERT INTO app_user (id, username, password_hash, role, created_at)
+        VALUES (CAST(#{id} AS uuid), #{username}, #{passwordHash}, #{role}, #{createdAt})
+    </insert>
+
+    <select id="selectByUsername" resultMap="AppUserMap">
+        SELECT id, username, password_hash, role, created_at FROM app_user WHERE username = #{username}
+    </select>
+
+    <select id="selectById" resultMap="AppUserMap">
+        SELECT id, username, password_hash, role, created_at FROM app_user WHERE id = CAST(#{id} AS uuid)
+    </select>
+</mapper>

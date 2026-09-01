@@ -1,0 +1,12 @@
+target/
+data/
+.env
+.env.*
+!.env.example
+*.log
+output*.txt
+.idea/
+.vscode/
+.git/
+.gitignore
+Dockerfile*
