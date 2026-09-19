@@ -20,6 +20,9 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import org.junit.jupiter.api.Tag;
+
+@Tag("postgres-integration")
 class FlywayCleanDatabaseMigrationTest {
 
     @Test
@@ -92,7 +95,9 @@ class FlywayCleanDatabaseMigrationTest {
             } catch (Exception ignored) {}
         }
 
-        Assumptions.assumeTrue(targetPort > 0, "Live PostgreSQL on port 5432 or 5433 is required for this migration test");
+        if (targetPort < 0) {
+            org.junit.jupiter.api.Assertions.fail("Live PostgreSQL on port 5432 or 5433 is required for this migration test");
+        }
 
         String jdbcUrl = "jdbc:postgresql://127.0.0.1:" + targetPort + "/jmindops_flyway_test";
         String username = "postgres";

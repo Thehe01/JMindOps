@@ -82,6 +82,10 @@ public class DocumentIndexTaskEnqueueService {
 
         // 2. 加锁后重新查询 document 表
         Document existing = documentMapper.selectByKbIdAndSourceKey(kbId, sourceKey);
+        
+        Optional<DocumentIndexTask> latestTaskOpt = taskStore.findLatestByKbIdAndSourceKey(kbId, sourceKey);
+        Optional<DocumentIndexTask> activeTaskOpt = taskStore.findLatestActiveByKbIdAndSourceKey(kbId, sourceKey);
+
         if (existing != null
                 && contentHash.equals(existing.getContentHash())
                 && indexFingerprint.equals(existing.getIndexFingerprint())
@@ -96,9 +100,7 @@ public class DocumentIndexTaskEnqueueService {
             );
         }
 
-        // 3. 加锁后重新查询活跃任务
-        Optional<DocumentIndexTask> activeTaskOpt =
-                taskStore.findLatestActiveByKbIdAndSourceKey(kbId, sourceKey);
+        // 3. 活跃任务去重
         if (activeTaskOpt.isPresent()) {
             DocumentIndexTask activeTask = activeTaskOpt.get();
             if (contentHash.equals(activeTask.getContentHash())
@@ -116,25 +118,29 @@ public class DocumentIndexTaskEnqueueService {
         }
 
         // 4. 计算 documentId、nextVersion、oldFilePath
-        boolean newDocument = existing == null && activeTaskOpt.isEmpty();
+        boolean newDocument = existing == null && latestTaskOpt.isEmpty();
         String documentId;
-        int nextVersion;
-        String oldFilePath;
 
-        if (activeTaskOpt.isPresent()) {
-            DocumentIndexTask activeTask = activeTaskOpt.get();
-            documentId = activeTask.getDocumentId();
-            nextVersion = activeTask.getIndexVersion() + 1;
-            oldFilePath = existing != null ? storedFilePath(existing) : activeTask.getFilePath();
-        } else if (existing != null) {
+        if (existing != null) {
             documentId = existing.getId();
-            nextVersion = existing.getIndexVersion() == null ? 1 : existing.getIndexVersion() + 1;
-            oldFilePath = storedFilePath(existing);
+        } else if (latestTaskOpt.isPresent()) {
+            documentId = latestTaskOpt.get().getDocumentId();
+        } else if (preferredDocumentId != null && !preferredDocumentId.isBlank()) {
+            documentId = preferredDocumentId;
         } else {
-            documentId = (preferredDocumentId != null && !preferredDocumentId.isBlank())
-                    ? preferredDocumentId
-                    : UUID.randomUUID().toString();
-            nextVersion = 1;
+            documentId = UUID.randomUUID().toString();
+        }
+
+        int documentVersion = existing != null && existing.getIndexVersion() != null ? existing.getIndexVersion() : 0;
+        int latestTaskVersion = latestTaskOpt.map(DocumentIndexTask::getIndexVersion).orElse(0);
+        int nextVersion = Math.max(documentVersion, latestTaskVersion) + 1;
+
+        String oldFilePath;
+        if (existing != null) {
+            oldFilePath = storedFilePath(existing);
+        } else if (latestTaskOpt.isPresent()) {
+            oldFilePath = latestTaskOpt.get().getFilePath();
+        } else {
             oldFilePath = null;
         }
 

@@ -17,6 +17,9 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import org.junit.jupiter.api.Tag;
+
+@Tag("postgres-integration")
 class DocumentIndexTaskConcurrentUploadTest {
 
     private DocumentMapper documentMapper;
@@ -129,7 +132,9 @@ class DocumentIndexTaskConcurrentUploadTest {
             } catch (Exception ignored) {}
         }
 
-        org.junit.jupiter.api.Assumptions.assumeTrue(targetPort > 0, "Live PostgreSQL database required on port 5432 or 5433");
+        if (targetPort < 0) {
+            org.junit.jupiter.api.Assertions.fail("Live PostgreSQL database required on port 5432 or 5433");
+        }
 
         String username = System.getenv().getOrDefault("POSTGRES_USER", "jmindops_owner");
         String password = System.getenv().getOrDefault("POSTGRES_PASSWORD", "jmindops_owner");

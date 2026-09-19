@@ -106,3 +106,40 @@ jobs:
       - name: Remove test stack and volumes
         if: always()
         run: docker compose down --volumes --remove-orphans
+
+  postgres-integration:
+    name: PostgreSQL integration tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: jmindops
+    services:
+      postgres:
+        image: paradedb/paradedb:0.25.6-pg15
+        command: ["postgres", "-c", "shared_preload_libraries=pg_search,pg_cron"]
+        env:
+          POSTGRES_USER: jmindops_owner
+          POSTGRES_PASSWORD: jmindops_owner
+          POSTGRES_DB: jmindops
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - name: Wait for database
+        run: |
+          for i in {1..10}; do
+            docker exec ${{ job.services.postgres.id }} pg_isready -U jmindops_owner -d jmindops && break
+            sleep 3
+          done
+      - name: Run PostgreSQL Integration Tests
+        run: mvn -B -ntp verify -Dgroups="postgres-integration" -Dtest.excluded-groups=live -Dspring.datasource.url=jdbc:postgresql://127.0.0.1:5432/jmindops -Dspring.datasource.username=jmindops_owner -Dspring.datasource.password=jmindops_owner -Dspring.flyway.user=jmindops_owner -Dspring.flyway.password=jmindops_owner

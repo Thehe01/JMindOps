@@ -173,10 +173,12 @@ public class DocumentIndexTaskStore {
                 """, taskId, workerId, leaseVersion) == 1;
     }
 
+    @Deprecated
     public boolean touchHeartbeat(String taskId, long leaseVersion, String workerId) {
         return touchHeartbeat(taskId, workerId, leaseVersion);
     }
 
+    @Deprecated
     public boolean touchHeartbeat(String taskId, String workerId) {
         return jdbcTemplate.update("""
                 UPDATE document_index_task
@@ -204,6 +206,7 @@ public class DocumentIndexTaskStore {
                 """, chunkCount, reusedCount, embeddedCount, taskId, workerId, leaseVersion) == 1;
     }
 
+    @Deprecated
     public boolean markSucceeded(String taskId, long leaseVersion, int chunkCount, int reusedCount, int embeddedCount) {
         return jdbcTemplate.update("""
                 UPDATE document_index_task
@@ -222,6 +225,7 @@ public class DocumentIndexTaskStore {
                 """, chunkCount, reusedCount, embeddedCount, taskId, leaseVersion) == 1;
     }
 
+    @Deprecated
     public boolean markSucceeded(String taskId, int chunkCount, int reusedCount, int embeddedCount) {
         return jdbcTemplate.update("""
                 UPDATE document_index_task
@@ -253,6 +257,7 @@ public class DocumentIndexTaskStore {
                 """, retryCount, nextRetryAt, sanitizeError(errorMessage), taskId, workerId, leaseVersion) == 1;
     }
 
+    @Deprecated
     public boolean markRetryWait(String taskId, long leaseVersion, String errorMessage, LocalDateTime nextRetryAt, int retryCount) {
         return jdbcTemplate.update("""
                 UPDATE document_index_task
@@ -268,6 +273,7 @@ public class DocumentIndexTaskStore {
                 """, retryCount, nextRetryAt, sanitizeError(errorMessage), taskId, leaseVersion) == 1;
     }
 
+    @Deprecated
     public boolean markRetryWait(String taskId, String errorMessage, LocalDateTime nextRetryAt, int retryCount) {
         return jdbcTemplate.update("""
                 UPDATE document_index_task
@@ -297,6 +303,7 @@ public class DocumentIndexTaskStore {
                 """, retryCount, sanitizeError(errorMessage), taskId, workerId, leaseVersion) == 1;
     }
 
+    @Deprecated
     public boolean markFailed(String taskId, long leaseVersion, String errorMessage, int retryCount) {
         return jdbcTemplate.update("""
                 UPDATE document_index_task
@@ -312,6 +319,7 @@ public class DocumentIndexTaskStore {
                 """, retryCount, sanitizeError(errorMessage), taskId, leaseVersion) == 1;
     }
 
+    @Deprecated
     public boolean markFailed(String taskId, String errorMessage, int retryCount) {
         return jdbcTemplate.update("""
                 UPDATE document_index_task
@@ -582,6 +590,13 @@ public class DocumentIndexTaskStore {
         List<DocumentIndexTask> tasks = jdbcTemplate.query(
                 SELECT_COLUMNS + " WHERE document_id = CAST(? AS uuid) ORDER BY created_at DESC LIMIT 1",
                 ROW_MAPPER, documentId);
+        return tasks.stream().findFirst();
+    }
+
+    public Optional<DocumentIndexTask> findLatestByKbIdAndSourceKey(String kbId, String sourceKey) {
+        List<DocumentIndexTask> tasks = jdbcTemplate.query(
+                SELECT_COLUMNS + " WHERE kb_id = CAST(? AS uuid) AND source_key = ? ORDER BY index_version DESC, created_at DESC LIMIT 1",
+                ROW_MAPPER, kbId, sourceKey);
         return tasks.stream().findFirst();
     }
 

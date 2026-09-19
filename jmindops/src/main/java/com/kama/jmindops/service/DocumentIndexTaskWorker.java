@@ -36,6 +36,7 @@ public class DocumentIndexTaskWorker {
     private final ExecutorService workerExecutor;
     private final ScheduledExecutorService heartbeatScheduler;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public DocumentIndexTaskWorker(
             DocumentIndexTaskStore store,
             DocumentIndexTaskExecutor executor,
@@ -45,7 +46,7 @@ public class DocumentIndexTaskWorker {
         this(store, executor, retryPolicy, "worker-" + UUID.randomUUID(), workerThreads);
     }
 
-    public DocumentIndexTaskWorker(
+    DocumentIndexTaskWorker(
             DocumentIndexTaskStore store,
             DocumentIndexTaskExecutor executor,
             IndexRetryPolicy retryPolicy,

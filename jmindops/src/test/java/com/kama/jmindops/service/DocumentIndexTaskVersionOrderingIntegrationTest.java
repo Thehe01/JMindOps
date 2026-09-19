@@ -24,6 +24,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import org.junit.jupiter.api.Tag;
+
+@Tag("postgres-integration")
 class DocumentIndexTaskVersionOrderingIntegrationTest {
 
     @Test
@@ -184,7 +187,9 @@ class DocumentIndexTaskVersionOrderingIntegrationTest {
             } catch (Exception ignored) {}
         }
 
-        Assumptions.assumeTrue(targetPort > 0, "Live PostgreSQL required for live serialization query execution");
+        if (targetPort < 0) {
+            org.junit.jupiter.api.Assertions.fail("Live PostgreSQL required for live serialization query execution");
+        }
 
         String username = System.getenv().getOrDefault("POSTGRES_USER", "jmindops_owner");
         String password = System.getenv().getOrDefault("POSTGRES_PASSWORD", "jmindops_owner");

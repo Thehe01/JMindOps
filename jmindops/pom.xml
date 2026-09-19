@@ -22,7 +22,7 @@
     <properties>
         <java.version>17</java.version>
         <!-- Real-provider tests are opt-in via -Plive-tests. -->
-        <test.excluded-groups>live</test.excluded-groups>
+        <test.excluded-groups>live,postgres-integration</test.excluded-groups>
     </properties>
 
     <!-- 自动管理 SpringAI 所有依赖的版本 -->
