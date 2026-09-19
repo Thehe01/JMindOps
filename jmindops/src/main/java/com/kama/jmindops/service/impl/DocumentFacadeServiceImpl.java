@@ -27,6 +27,7 @@ import com.kama.jmindops.model.entity.DocumentIndexTaskStatus;
 import com.kama.jmindops.service.DocumentIndexTaskStore;
 import com.kama.jmindops.service.DocumentIndexTaskWorker;
 import com.kama.jmindops.service.IndexRetryPolicy;
+import com.kama.jmindops.service.DocumentIndexTaskEnqueueService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
@@ -77,6 +78,7 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
     private final DocumentIndexTaskStore documentIndexTaskStore;
     private final DocumentIndexTaskWorker documentIndexTaskWorker;
     private final IndexRetryPolicy indexRetryPolicy;
+    private final DocumentIndexTaskEnqueueService documentIndexTaskEnqueueService;
 
     public DocumentFacadeServiceImpl(
             DocumentMapper documentMapper,
@@ -89,10 +91,9 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
     ) {
         this(documentMapper, documentConverter, documentStorageService, markdownParserService,
                 documentParserService, incrementalIndexService, resourceAccessService,
-                null, null, null);
+                null, null, null, null);
     }
 
-    @Autowired
     public DocumentFacadeServiceImpl(
             DocumentMapper documentMapper,
             DocumentConverter documentConverter,
@@ -105,6 +106,25 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
             DocumentIndexTaskWorker documentIndexTaskWorker,
             IndexRetryPolicy indexRetryPolicy
     ) {
+        this(documentMapper, documentConverter, documentStorageService, markdownParserService,
+                documentParserService, incrementalIndexService, resourceAccessService,
+                documentIndexTaskStore, documentIndexTaskWorker, indexRetryPolicy, null);
+    }
+
+    @Autowired
+    public DocumentFacadeServiceImpl(
+            DocumentMapper documentMapper,
+            DocumentConverter documentConverter,
+            DocumentStorageService documentStorageService,
+            MarkdownParserService markdownParserService,
+            DocumentParserService documentParserService,
+            IncrementalDocumentIndexService incrementalIndexService,
+            ResourceAccessService resourceAccessService,
+            @Autowired(required = false) DocumentIndexTaskStore documentIndexTaskStore,
+            @Autowired(required = false) DocumentIndexTaskWorker documentIndexTaskWorker,
+            @Autowired(required = false) IndexRetryPolicy indexRetryPolicy,
+            @Autowired(required = false) DocumentIndexTaskEnqueueService documentIndexTaskEnqueueService
+    ) {
         this.documentMapper = documentMapper;
         this.documentConverter = documentConverter;
         this.documentStorageService = documentStorageService;
@@ -115,6 +135,7 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
         this.documentIndexTaskStore = documentIndexTaskStore;
         this.documentIndexTaskWorker = documentIndexTaskWorker;
         this.indexRetryPolicy = indexRetryPolicy;
+        this.documentIndexTaskEnqueueService = documentIndexTaskEnqueueService;
     }
 
     @Override
@@ -277,6 +298,32 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
 
             newFilePath = documentStorageService.saveFile(kbId, documentId, file);
 
+            if (documentIndexTaskEnqueueService != null) {
+                int maxRetries = indexRetryPolicy != null ? indexRetryPolicy.getMaxRetries() : 3;
+                DocumentIndexTaskEnqueueService.EnqueueResult enqueueResult =
+                        documentIndexTaskEnqueueService.enqueue(
+                                kbId,
+                                originalFilename,
+                                filetype,
+                                fileSize,
+                                newFilePath,
+                                contentHash,
+                                sourceKey,
+                                indexFingerprint,
+                                maxRetries,
+                                documentId
+                        );
+
+                return CreateDocumentResponse.builder()
+                        .documentId(enqueueResult.documentId())
+                        .indexAction(enqueueResult.action())
+                        .indexVersion(enqueueResult.version())
+                        .chunkCount(0)
+                        .reusedChunkCount(0)
+                        .embeddedChunkCount(0)
+                        .build();
+            }
+
             if (documentIndexTaskStore != null) {
                 DocumentIndexTask task = DocumentIndexTask.builder()
                         .id(UUID.randomUUID().toString())
@@ -385,9 +432,9 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
 
         if (documentIndexTaskStore != null) {
             try {
-                documentIndexTaskStore.deleteByDocumentId(documentId);
+                documentIndexTaskStore.requestCancellationByDocumentId(documentId);
             } catch (Exception e) {
-                log.warn("清理文档任务记录失败: documentId={}", documentId);
+                log.warn("取消文档任务记录失败: documentId={}", documentId);
             }
         }
 

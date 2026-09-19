@@ -23,9 +23,15 @@ public class DocumentIndexStore {
 
     @Transactional
     public void replace(Document document, boolean newDocument, List<ChunkBgeM3> chunks) {
+        int expectedVersion = document != null && document.getIndexVersion() != null ? document.getIndexVersion() - 1 : 0;
+        replace(document, newDocument, expectedVersion, chunks);
+    }
+
+    @Transactional
+    public void replace(Document document, boolean newDocument, int expectedVersion, List<ChunkBgeM3> chunks) {
         int affected = newDocument
                 ? documentMapper.insert(document)
-                : documentMapper.updateIndexByVersion(document, document.getIndexVersion() - 1);
+                : documentMapper.updateIndexByVersion(document, expectedVersion);
         if (affected != 1) {
             throw new BizException(newDocument
                     ? "创建文档记录失败"

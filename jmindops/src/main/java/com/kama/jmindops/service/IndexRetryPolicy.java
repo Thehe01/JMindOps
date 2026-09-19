@@ -53,6 +53,10 @@ public class IndexRetryPolicy {
     }
 
     public boolean canRetry(int retryCount, Throwable throwable) {
+        return canRetry(retryCount, this.maxRetries, throwable);
+    }
+
+    public boolean canRetry(int retryCount, int maxRetries, Throwable throwable) {
         if (retryCount >= maxRetries) {
             return false;
         }

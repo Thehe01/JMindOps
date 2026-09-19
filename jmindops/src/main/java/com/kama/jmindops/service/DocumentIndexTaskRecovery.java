@@ -41,13 +41,12 @@ public class DocumentIndexTaskRecovery {
     }
 
     public List<DocumentIndexTask> recoverStaleRunningTasks() {
-        Duration backoff = retryPolicy.calculateBackoff(0);
         List<DocumentIndexTask> recovered = store.recoverStaleRunningTasks(
-                retryPolicy.getRunningTimeout(), backoff, batchSize);
-        if (!recovered.isEmpty()) {
+                retryPolicy.getRunningTimeout(), retryPolicy, batchSize);
+        if (recovered != null && !recovered.isEmpty()) {
             log.warn("Recovered {} stale RUNNING document index tasks", recovered.size());
             worker.triggerAsync();
         }
-        return recovered;
+        return recovered != null ? recovered : List.of();
     }
 }

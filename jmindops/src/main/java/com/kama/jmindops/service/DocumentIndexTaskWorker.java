@@ -1,6 +1,9 @@
 package com.kama.jmindops.service;
 
+import com.kama.jmindops.exception.StaleDocumentIndexLeaseException;
+import com.kama.jmindops.exception.TaskCancelledException;
 import com.kama.jmindops.model.entity.DocumentIndexTask;
+import com.kama.jmindops.model.entity.DocumentIndexTaskStatus;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -82,24 +85,66 @@ public class DocumentIndexTaskWorker {
         DocumentIndexTask task = taskOpt.get();
         activeTasks.put(task.getId(), task);
         try {
-            log.info("Worker [{}] claimed index task: taskId={}, documentId={}, version={}",
-                    workerId, task.getId(), task.getDocumentId(), task.getIndexVersion());
+            log.info("Worker [{}] claimed index task: taskId={}, documentId={}, version={}, lease={}",
+                    workerId, task.getId(), task.getDocumentId(), task.getIndexVersion(), task.getLeaseVersion());
 
             DocumentIndexTaskExecutor.ExecutionResult result = executor.execute(task);
 
-            store.markSucceeded(task.getId(), result.chunkCount(), result.reusedChunkCount(), result.embeddedChunkCount());
+            if (task.getStatus() != DocumentIndexTaskStatus.SUCCEEDED) {
+                if (task.getLeaseVersion() != null) {
+                    boolean ok = store.markSucceeded(task.getId(), workerId, task.getLeaseVersion(),
+                            result.chunkCount(), result.reusedChunkCount(), result.embeddedChunkCount());
+                    if (!ok) {
+                        throw new StaleDocumentIndexLeaseException("Failed to mark task SUCCEEDED (stale lease): taskId=" + task.getId()
+                                + ", workerId=" + workerId + ", leaseVersion=" + task.getLeaseVersion());
+                    }
+                } else {
+                    store.markSucceeded(task.getId(), result.chunkCount(), result.reusedChunkCount(), result.embeddedChunkCount());
+                }
+            }
+
             log.info("Document index task SUCCEEDED: taskId={}, documentId={}, chunks={}, reused={}, embedded={}",
                     task.getId(), task.getDocumentId(), result.chunkCount(), result.reusedChunkCount(), result.embeddedChunkCount());
+        } catch (StaleDocumentIndexLeaseException e) {
+            log.warn("Document index task lease expired or superseded: taskId={}, workerId={}, leaseVersion={}, reason=STALE_LEASE",
+                    task.getId(), workerId, task.getLeaseVersion(), e);
+        } catch (TaskCancelledException e) {
+            log.info("Document index task was cancelled: taskId={}, workerId={}, leaseVersion={}",
+                    task.getId(), workerId, task.getLeaseVersion());
+            if (task.getLeaseVersion() != null) {
+                store.markCancelled(task.getId(), workerId, task.getLeaseVersion(), "任务已被用户取消");
+            }
+            executor.cleanupTaskFile(task);
         } catch (Throwable t) {
-            int nextRetryCount = task.getRetryCount() + 1;
-            boolean canRetry = retryPolicy.canRetry(task.getRetryCount(), t);
+            int currentRetry = task.getRetryCount() != null ? task.getRetryCount() : 0;
+            int nextRetryCount = currentRetry + 1;
+            int maxRetries = task.getMaxRetries() != null ? task.getMaxRetries() : retryPolicy.getMaxRetries();
+            boolean canRetry = retryPolicy.canRetry(currentRetry, maxRetries, t);
             if (canRetry) {
-                LocalDateTime nextRetryAt = retryPolicy.calculateNextRetryAt(task.getRetryCount());
-                store.markRetryWait(task.getId(), t.getMessage(), nextRetryAt, nextRetryCount);
+                LocalDateTime nextRetryAt = retryPolicy.calculateNextRetryAt(currentRetry);
+                if (task.getLeaseVersion() != null) {
+                    boolean ok = store.markRetryWait(task.getId(), workerId, task.getLeaseVersion(), t.getMessage(), nextRetryAt, nextRetryCount);
+                    if (!ok) {
+                        log.warn("Failed to mark task RETRY_WAIT (lease expired): taskId={}, workerId={}, leaseVersion={}, reason=STALE_LEASE",
+                                task.getId(), workerId, task.getLeaseVersion());
+                        return true;
+                    }
+                } else {
+                    store.markRetryWait(task.getId(), t.getMessage(), nextRetryAt, nextRetryCount);
+                }
                 log.warn("Document index task failed (retryable): taskId={}, retryCount={}, nextRetryAt={}, error={}",
                         task.getId(), nextRetryCount, nextRetryAt, t.getMessage());
             } else {
-                store.markFailed(task.getId(), t.getMessage(), nextRetryCount);
+                if (task.getLeaseVersion() != null) {
+                    boolean ok = store.markFailed(task.getId(), workerId, task.getLeaseVersion(), t.getMessage(), nextRetryCount);
+                    if (!ok) {
+                        log.warn("Failed to mark task FAILED (lease expired): taskId={}, workerId={}, leaseVersion={}, reason=STALE_LEASE",
+                                task.getId(), workerId, task.getLeaseVersion());
+                        return true;
+                    }
+                } else {
+                    store.markFailed(task.getId(), t.getMessage(), nextRetryCount);
+                }
                 log.error("Document index task failed permanently: taskId={}, retryCount={}, error={}",
                         task.getId(), nextRetryCount, t.getMessage(), t);
             }
@@ -122,11 +167,19 @@ public class DocumentIndexTaskWorker {
     }
 
     public void heartbeatActiveTasks() {
-        for (String taskId : activeTasks.keySet()) {
+        for (DocumentIndexTask active : activeTasks.values()) {
             try {
-                store.touchHeartbeat(taskId, workerId);
+                if (active.getLeaseVersion() != null) {
+                    boolean ok = store.touchHeartbeat(active.getId(), workerId, active.getLeaseVersion());
+                    if (!ok) {
+                        log.warn("Heartbeat rejected (lease expired or cancelled): taskId={}, workerId={}, leaseVersion={}",
+                                active.getId(), workerId, active.getLeaseVersion());
+                    }
+                } else {
+                    store.touchHeartbeat(active.getId(), workerId);
+                }
             } catch (Exception e) {
-                log.warn("Failed to touch heartbeat: taskId={}, workerId={}", taskId, workerId, e);
+                log.warn("Failed to touch heartbeat: taskId={}, workerId={}", active.getId(), workerId, e);
             }
         }
     }

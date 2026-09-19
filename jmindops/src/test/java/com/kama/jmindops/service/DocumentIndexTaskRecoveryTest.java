@@ -32,13 +32,13 @@ class DocumentIndexTaskRecoveryTest {
 
     @Test
     void heartbeatsLocallyOwnedTasksBeforeRecovery() {
-        when(store.recoverStaleRunningTasks(any(Duration.class), any(Duration.class), eq(10)))
+        when(store.recoverStaleRunningTasks(any(Duration.class), any(IndexRetryPolicy.class), eq(10)))
                 .thenReturn(List.of());
 
         recovery.recover();
 
         verify(worker).heartbeatActiveTasks();
-        verify(store).recoverStaleRunningTasks(Duration.ofSeconds(120), Duration.ofSeconds(2), 10);
+        verify(store).recoverStaleRunningTasks(Duration.ofSeconds(120), retryPolicy, 10);
         verify(worker, never()).triggerAsync();
     }
 
@@ -51,13 +51,13 @@ class DocumentIndexTaskRecoveryTest {
                 .maxRetries(3)
                 .build();
 
-        when(store.recoverStaleRunningTasks(Duration.ofSeconds(120), Duration.ofSeconds(2), 10))
+        when(store.recoverStaleRunningTasks(Duration.ofSeconds(120), retryPolicy, 10))
                 .thenReturn(List.of(recoveredTask));
 
         recovery.recover();
 
         verify(worker).heartbeatActiveTasks();
-        verify(store).recoverStaleRunningTasks(Duration.ofSeconds(120), Duration.ofSeconds(2), 10);
+        verify(store).recoverStaleRunningTasks(Duration.ofSeconds(120), retryPolicy, 10);
         verify(worker).triggerAsync();
     }
 }

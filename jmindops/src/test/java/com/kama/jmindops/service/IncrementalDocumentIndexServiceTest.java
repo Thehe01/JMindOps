@@ -62,7 +62,7 @@ class IncrementalDocumentIndexServiceTest {
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<ChunkBgeM3>> chunks = ArgumentCaptor.forClass(List.class);
         verify(indexStore).replace(org.mockito.ArgumentMatchers.same(document),
-                org.mockito.ArgumentMatchers.eq(false), chunks.capture());
+                org.mockito.ArgumentMatchers.eq(false), org.mockito.ArgumentMatchers.anyInt(), chunks.capture());
         assertThat(chunks.getValue().get(0).getId())
                 .isEqualTo("22222222-2222-2222-2222-222222222222");
         assertThat(chunks.getValue().get(0).getEmbedding()).isSameAs(oldEmbedding);

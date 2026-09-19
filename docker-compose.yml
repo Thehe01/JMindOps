@@ -3,7 +3,7 @@ services:
     # Keep PostgreSQL 15 for data-volume compatibility while adding pg_search's
     # native BM25 index. ParadeDB also bundles pgvector.
     image: paradedb/paradedb:0.25.6-pg15
-    command: ["postgres", "-c", "shared_preload_libraries=pg_search"]
+    command: ["postgres", "-c", "shared_preload_libraries=pg_search,pg_cron"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-jmindops_owner}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}

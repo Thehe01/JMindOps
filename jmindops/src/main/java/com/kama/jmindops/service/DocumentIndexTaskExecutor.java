@@ -33,6 +33,8 @@ public class DocumentIndexTaskExecutor {
     private final DocumentParserService documentParserService;
     private final IncrementalDocumentIndexService incrementalIndexService;
     private final DocumentMapper documentMapper;
+    private final DocumentIndexCommitService commitService;
+    private final DocumentIndexTaskStore taskStore;
 
     public DocumentIndexTaskExecutor(
             DocumentStorageService documentStorageService,
@@ -40,7 +42,17 @@ public class DocumentIndexTaskExecutor {
             DocumentParserService documentParserService,
             IncrementalDocumentIndexService incrementalIndexService
     ) {
-        this(documentStorageService, markdownParserService, documentParserService, incrementalIndexService, null);
+        this(documentStorageService, markdownParserService, documentParserService, incrementalIndexService, null, null, null);
+    }
+
+    public DocumentIndexTaskExecutor(
+            DocumentStorageService documentStorageService,
+            MarkdownParserService markdownParserService,
+            DocumentParserService documentParserService,
+            IncrementalDocumentIndexService incrementalIndexService,
+            DocumentMapper documentMapper
+    ) {
+        this(documentStorageService, markdownParserService, documentParserService, incrementalIndexService, documentMapper, null, null);
     }
 
     @Autowired
@@ -49,13 +61,17 @@ public class DocumentIndexTaskExecutor {
             MarkdownParserService markdownParserService,
             DocumentParserService documentParserService,
             IncrementalDocumentIndexService incrementalIndexService,
-            @Autowired(required = false) DocumentMapper documentMapper
+            @Autowired(required = false) DocumentMapper documentMapper,
+            @Autowired(required = false) DocumentIndexCommitService commitService,
+            @Autowired(required = false) DocumentIndexTaskStore taskStore
     ) {
         this.documentStorageService = documentStorageService;
         this.markdownParserService = markdownParserService;
         this.documentParserService = documentParserService;
         this.incrementalIndexService = incrementalIndexService;
         this.documentMapper = documentMapper;
+        this.commitService = commitService;
+        this.taskStore = taskStore;
     }
 
     public ExecutionResult execute(DocumentIndexTask task) throws IOException {
@@ -102,29 +118,93 @@ public class DocumentIndexTaskExecutor {
                 .build();
 
         boolean isNew = task.isNewDocument();
+        int expectedVersion = task.getIndexVersion() != null ? task.getIndexVersion() - 1 : 0;
+        String previousDbFilePath = null;
         if (documentMapper != null) {
             Document existingInDb = documentMapper.selectById(task.getDocumentId());
             if (existingInDb != null) {
                 isNew = false;
+                previousDbFilePath = storedFilePath(existingInDb);
+                if (existingInDb.getIndexVersion() != null) {
+                    expectedVersion = existingInDb.getIndexVersion();
+                }
             }
+        }
+
+        if (commitService != null) {
+            IncrementalDocumentIndexService.PreparedIndex prepared =
+                    incrementalIndexService.prepareIndex(document, isNew, expectedVersion, chunks);
+            commitService.commit(
+                    task,
+                    task.getWorkerId(),
+                    task.getLeaseVersion() != null ? task.getLeaseVersion() : 0L,
+                    prepared
+            );
+            cleanupOldFile(task, previousDbFilePath);
+            return new ExecutionResult(prepared.result().chunkCount(), prepared.result().reusedChunkCount(), prepared.result().embeddedChunkCount());
         }
 
         IncrementalDocumentIndexService.IndexResult indexResult =
                 incrementalIndexService.replaceIndex(document, isNew, chunks);
 
-        cleanupOldFile(task);
+        cleanupOldFile(task, previousDbFilePath);
 
         return new ExecutionResult(indexResult.chunkCount(), indexResult.reusedChunkCount(), indexResult.embeddedChunkCount());
     }
 
+    public void cleanupTaskFile(DocumentIndexTask task) {
+        if (task == null || task.getFilePath() == null) {
+            return;
+        }
+        if (taskStore != null && taskStore.isFilePathInUse(task.getFilePath(), task.getId())) {
+            log.info("任务物理文件仍在其他引用中使用，跳过清理: taskId={}, path={}", task.getId(), task.getFilePath());
+            return;
+        }
+        try {
+            documentStorageService.deleteFile(task.getFilePath());
+            log.info("已清理任务关联文件: taskId={}, path={}", task.getId(), task.getFilePath());
+        } catch (Exception e) {
+            log.warn("清理任务关联文件失败: taskId={}, path={}, error={}", task.getId(), task.getFilePath(), e.getMessage());
+        }
+    }
+
     private void cleanupOldFile(DocumentIndexTask task) {
+        cleanupOldFile(task, null);
+    }
+
+    private void cleanupOldFile(DocumentIndexTask task, String previousDbFilePath) {
         if (task.getOldFilePath() != null && !task.getOldFilePath().equals(task.getFilePath())) {
-            try {
-                documentStorageService.deleteFile(task.getOldFilePath());
-            } catch (Exception cleanupError) {
-                log.warn("新索引已生效，但旧文件清理失败: documentId={}, oldPath={}",
-                        task.getDocumentId(), task.getOldFilePath());
-            }
+            safeDeleteIfNotInUse(task.getOldFilePath(), task.getId());
+        }
+        if (previousDbFilePath != null && !previousDbFilePath.equals(task.getFilePath())
+                && !previousDbFilePath.equals(task.getOldFilePath())) {
+            safeDeleteIfNotInUse(previousDbFilePath, task.getId());
+        }
+    }
+
+    private void safeDeleteIfNotInUse(String path, String taskId) {
+        if (path == null) {
+            return;
+        }
+        if (taskStore != null && taskStore.isFilePathInUse(path, taskId)) {
+            log.info("旧文件仍在其他活跃任务中使用，跳过物理删除: taskId={}, oldPath={}", taskId, path);
+            return;
+        }
+        try {
+            documentStorageService.deleteFile(path);
+        } catch (Exception cleanupError) {
+            log.warn("新索引已生效，但旧文件清理失败: taskId={}, oldPath={}", taskId, path);
+        }
+    }
+
+    private String storedFilePath(Document document) {
+        if (document == null || document.getMetadata() == null) {
+            return null;
+        }
+        try {
+            return OBJECT_MAPPER.readValue(document.getMetadata(), DocumentDTO.MetaData.class).getFilePath();
+        } catch (Exception exception) {
+            return null;
         }
     }
 

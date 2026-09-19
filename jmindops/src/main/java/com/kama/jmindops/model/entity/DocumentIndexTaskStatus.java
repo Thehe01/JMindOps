@@ -5,5 +5,6 @@ public enum DocumentIndexTaskStatus {
     RUNNING,
     RETRY_WAIT,
     SUCCEEDED,
-    FAILED
+    FAILED,
+    CANCELLED
 }

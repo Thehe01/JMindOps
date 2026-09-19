@@ -20,6 +20,8 @@ public class DocumentIndexTask {
     private String documentId;
     private Integer indexVersion;
     private DocumentIndexTaskStatus status;
+    private Long leaseVersion;
+    private Boolean cancelRequested;
     private Integer retryCount;
     private Integer maxRetries;
     private LocalDateTime nextRetryAt;

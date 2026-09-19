@@ -35,13 +35,22 @@ class FlywayCleanDatabaseMigrationTest {
                 .toList();
 
         assertThat(filenames).anyMatch(name -> name.startsWith("V10__"));
+        assertThat(filenames).anyMatch(name -> name.startsWith("V11__"));
 
         Resource v10Resource = resolver.getResource("classpath:db/migration/V10__durable_document_index_task.sql");
         assertThat(v10Resource.exists()).isTrue();
 
+        Resource v11Resource = resolver.getResource("classpath:db/migration/V11__document_index_task_fencing_and_cancellation.sql");
+        assertThat(v11Resource.exists()).isTrue();
+
         String v10Sql;
         try (InputStream is = v10Resource.getInputStream()) {
             v10Sql = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+        }
+
+        String v11Sql;
+        try (InputStream is = v11Resource.getInputStream()) {
+            v11Sql = new String(is.readAllBytes(), StandardCharsets.UTF_8);
         }
 
         assertThat(v10Sql)
@@ -52,6 +61,11 @@ class FlywayCleanDatabaseMigrationTest {
                 .contains("idx_doc_index_task_claim")
                 .contains("idx_doc_index_task_recovery")
                 .contains("idx_doc_index_task_kb_source");
+
+        assertThat(v11Sql)
+                .contains("lease_version")
+                .contains("cancel_requested")
+                .contains("CANCELLED");
 
         List<String> expectedColumns = List.of(
                 "id", "kb_id", "document_id", "index_version", "status",
@@ -108,7 +122,7 @@ class FlywayCleanDatabaseMigrationTest {
             assertThat(info.getState().isApplied()).isTrue();
         }
 
-        assertThat(versions).contains("1", "2", "3", "4", "5", "6", "7", "8", "9", "10");
+        assertThat(versions).contains("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11");
 
         // Verify table document_index_task exists and has expected structure
         try (Connection conn = DriverManager.getConnection(jdbcUrl, username, password);
@@ -126,6 +140,7 @@ class FlywayCleanDatabaseMigrationTest {
                     "content_hash", "source_key", "index_fingerprint",
                     "is_new_document", "old_file_path",
                     "chunk_count", "reused_chunk_count", "embedded_chunk_count",
+                    "lease_version", "cancel_requested",
                     "created_at", "updated_at"
             );
         }

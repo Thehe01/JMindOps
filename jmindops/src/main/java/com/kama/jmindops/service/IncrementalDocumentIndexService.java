@@ -40,7 +40,12 @@ public class IncrementalDocumentIndexService {
         return indexFingerprint.current();
     }
 
-    public IndexResult replaceIndex(Document document, boolean newDocument, List<ChunkInput> inputs) {
+    public PreparedIndex prepareIndex(Document document, boolean newDocument, List<ChunkInput> inputs) {
+        int expectedVersion = document != null && document.getIndexVersion() != null ? document.getIndexVersion() - 1 : 0;
+        return prepareIndex(document, newDocument, expectedVersion, inputs);
+    }
+
+    public PreparedIndex prepareIndex(Document document, boolean newDocument, int expectedVersion, List<ChunkInput> inputs) {
         String activeFingerprint = currentFingerprint();
         document.setIndexFingerprint(activeFingerprint);
         List<ChunkBgeM3> existing = newDocument
@@ -100,8 +105,14 @@ public class IncrementalDocumentIndexService {
         document.setIndexStatus("READY");
         document.setIndexedAt(now);
         document.setUpdatedAt(now);
-        indexStore.replace(document, newDocument, replacement);
-        return new IndexResult(replacement.size(), reusedCount, embeddedCount);
+        IndexResult result = new IndexResult(replacement.size(), reusedCount, embeddedCount);
+        return new PreparedIndex(document, newDocument, expectedVersion, replacement, result);
+    }
+
+    public IndexResult replaceIndex(Document document, boolean newDocument, List<ChunkInput> inputs) {
+        PreparedIndex prepared = prepareIndex(document, newDocument, inputs);
+        indexStore.replace(prepared.document(), prepared.newDocument(), prepared.expectedVersion(), prepared.chunks());
+        return prepared.result();
     }
 
     private ChunkBgeM3 pollSameContent(Deque<ChunkBgeM3> candidates, String content) {
@@ -126,4 +137,16 @@ public class IncrementalDocumentIndexService {
     public record ChunkInput(String content, String metadata) {}
 
     public record IndexResult(int chunkCount, int reusedChunkCount, int embeddedChunkCount) {}
+
+    public record PreparedIndex(
+            Document document,
+            boolean newDocument,
+            int expectedVersion,
+            List<ChunkBgeM3> chunks,
+            IndexResult result
+    ) {
+        public PreparedIndex(Document document, boolean newDocument, List<ChunkBgeM3> chunks, IndexResult result) {
+            this(document, newDocument, document != null && document.getIndexVersion() != null ? document.getIndexVersion() - 1 : 0, chunks, result);
+        }
+    }
 }
