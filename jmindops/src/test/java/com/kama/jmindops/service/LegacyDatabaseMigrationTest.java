@@ -74,8 +74,8 @@ public class LegacyDatabaseMigrationTest {
                 docId, kbId, "Legacy Doc.md", "legacy_doc.md", "READY", 1, Timestamp.valueOf(LocalDateTime.now()), Timestamp.valueOf(LocalDateTime.now()));
 
         String chunkId = UUID.randomUUID().toString();
-        jdbcTemplate.update("INSERT INTO chunk_bge_m3 (id, kb_id, doc_id, content, chunk_hash, chunk_index, document_version, created_at, updated_at) " +
-                "VALUES (CAST(? AS uuid), CAST(? AS uuid), CAST(? AS uuid), ?, ?, ?, ?, ?, ?)",
+        jdbcTemplate.update("INSERT INTO chunk_bge_m3 (id, kb_id, doc_id, content, chunk_hash, chunk_index, document_version, embedding, created_at, updated_at) " +
+                "VALUES (CAST(? AS uuid), CAST(? AS uuid), CAST(? AS uuid), ?, ?, ?, ?, array_fill(0::real, ARRAY[1024])::vector, ?, ?)",
                 chunkId, kbId, docId, "Legacy Chunk Content", "dummy-hash", 0, 1, Timestamp.valueOf(LocalDateTime.now()), Timestamp.valueOf(LocalDateTime.now()));
 
         // 4. Migrate to latest
