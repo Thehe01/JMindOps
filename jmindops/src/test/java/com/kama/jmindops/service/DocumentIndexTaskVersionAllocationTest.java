@@ -70,6 +70,7 @@ public class DocumentIndexTaskVersionAllocationTest {
         assertEquals("doc-A", result.documentId());
         assertEquals(3, result.version());
         assertNotNull(result.task());
+        assertFalse(result.task().isNewDocument());
     }
 
     @Test
@@ -93,6 +94,7 @@ public class DocumentIndexTaskVersionAllocationTest {
         assertEquals("doc-A", result.documentId());
         assertEquals(3, result.version());
         assertNotNull(result.task());
+        assertFalse(result.task().isNewDocument());
     }
 
     @Test
@@ -227,6 +229,114 @@ public class DocumentIndexTaskVersionAllocationTest {
 
             // Verification: task v2 SUCCEEDED
             assertEquals(DocumentIndexTaskStatus.SUCCEEDED, v2Task.getStatus());
+        } finally {
+            Files.deleteIfExists(tempFile);
+        }
+    }
+
+    @Test
+    void failedAndCancelledIntermediateVersionsUpdateWithActualDbVersion() throws Exception {
+        String kbId = "kb-regression-2";
+        String sourceKey = "guide2.txt";
+        String docId = "doc-reg-2";
+
+        // 1. document v1 READY in DB
+        Document existingInDb = Document.builder()
+                .id(docId)
+                .kbId(kbId)
+                .filename("guide2.txt")
+                .sourceKey(sourceKey)
+                .indexVersion(1)
+                .indexStatus("READY")
+                .contentHash("hash-v1")
+                .indexFingerprint("fp-1")
+                .chunkCount(1)
+                .build();
+        when(documentMapper.selectByKbIdAndSourceKey(kbId, sourceKey)).thenReturn(existingInDb);
+        when(documentMapper.selectById(docId)).thenReturn(existingInDb);
+
+        // v3 CANCELLED (v2 FAILED, v3 CANCELLED in task history)
+        DocumentIndexTask v3Task = DocumentIndexTask.builder()
+                .id("task-v3")
+                .kbId(kbId)
+                .documentId(docId)
+                .indexVersion(3)
+                .status(DocumentIndexTaskStatus.CANCELLED)
+                .filePath("docs/v3.txt")
+                .filename("guide2.txt")
+                .sourceKey(sourceKey)
+                .build();
+
+        when(taskStore.findLatestByKbIdAndSourceKey(kbId, sourceKey)).thenReturn(Optional.of(v3Task));
+        when(taskStore.findLatestActiveByKbIdAndSourceKey(kbId, sourceKey)).thenReturn(Optional.empty());
+
+        // 2. enqueue v4
+        var result = enqueueService.enqueue(
+                kbId, "guide2.txt", "txt", 120L, "docs/v4.txt", "hash-v4", sourceKey, "fp-1", 3, null);
+
+        // Verification: same documentId, version=4, isNewDocument=false
+        assertEquals(docId, result.documentId());
+        assertEquals(4, result.version());
+        assertNotNull(result.task());
+        assertFalse(result.task().isNewDocument());
+
+        // 3. execution and final commit
+        DocumentIndexTask v4Task = result.task();
+        v4Task.setStatus(DocumentIndexTaskStatus.RUNNING);
+        v4Task.setWorkerId("worker-test");
+        v4Task.setLeaseVersion(2L);
+
+        Path tempFile = Files.createTempFile("test-v4", ".txt");
+        try {
+            Files.writeString(tempFile, "guide content v4");
+            when(storageService.getFilePath("docs/v4.txt")).thenReturn(tempFile);
+
+            MarkdownParserService markdownParserService = mock(MarkdownParserService.class);
+            DocumentParserService documentParserService = mock(DocumentParserService.class);
+            when(documentParserService.parse(any(), eq("txt"))).thenReturn(
+                    DocumentParserService.ParsedDocument.builder()
+                            .content("guide content v4")
+                            .fileType("txt")
+                            .build());
+
+            IncrementalDocumentIndexService incrementalIndexService = mock(IncrementalDocumentIndexService.class);
+            when(incrementalIndexService.prepareIndex(any(Document.class), eq(false), eq(1), any()))
+                    .thenAnswer(invocation -> {
+                        Document doc = invocation.getArgument(0);
+                        doc.setIndexStatus("READY");
+                        return new IncrementalDocumentIndexService.PreparedIndex(
+                                doc, false, 1, List.of(),
+                                new IncrementalDocumentIndexService.IndexResult(1, 0, 1));
+                    });
+
+            ChunkBgeM3Mapper chunkMapper = mock(ChunkBgeM3Mapper.class);
+            DocumentIndexStore indexStore = new DocumentIndexStore(documentMapper, chunkMapper);
+            DocumentIndexCommitService commitService = new DocumentIndexCommitService(taskStore, indexStore);
+
+            when(taskStore.findAndLockForCommit(v4Task.getId())).thenReturn(v4Task);
+            when(taskStore.markSucceeded(eq(v4Task.getId()), eq("worker-test"), eq(2L), anyInt(), anyInt(), anyInt()))
+                    .thenReturn(true);
+            when(documentMapper.updateIndexByVersion(any(Document.class), eq(1))).thenReturn(1);
+
+            DocumentIndexTaskExecutor executor = new DocumentIndexTaskExecutor(
+                    storageService, markdownParserService, documentParserService,
+                    incrementalIndexService, documentMapper, commitService, taskStore);
+
+            executor.execute(v4Task);
+
+            // Verification: final commit uses UPDATE with CAS expectedVersion=1 (NOT 3)
+            ArgumentCaptor<Document> docCaptor = ArgumentCaptor.forClass(Document.class);
+            verify(documentMapper).updateIndexByVersion(docCaptor.capture(), eq(1));
+            Document updatedDoc = docCaptor.getValue();
+            assertEquals(docId, updatedDoc.getId());
+            assertEquals(4, updatedDoc.getIndexVersion());
+            assertEquals("READY", updatedDoc.getIndexStatus());
+
+            // Verification: INSERT is NOT called
+            verify(documentMapper, never()).insert(any());
+
+            // Verification: task v4 SUCCEEDED
+            assertEquals(DocumentIndexTaskStatus.SUCCEEDED, v4Task.getStatus());
         } finally {
             Files.deleteIfExists(tempFile);
         }
