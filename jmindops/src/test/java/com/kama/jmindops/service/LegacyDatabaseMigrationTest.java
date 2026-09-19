@@ -69,9 +69,14 @@ public class LegacyDatabaseMigrationTest {
                 kbId, "Legacy KB", Timestamp.valueOf(LocalDateTime.now()), Timestamp.valueOf(LocalDateTime.now()));
 
         // Insert legacy document: READY, chunk_count > 0, index_fingerprint IS NULL
-        jdbcTemplate.update("INSERT INTO document (id, kb_id, name, status, index_status, chunk_count, created_at, updated_at) " +
+        jdbcTemplate.update("INSERT INTO document (id, kb_id, filename, source_key, index_status, chunk_count, created_at, updated_at) " +
                 "VALUES (CAST(? AS uuid), CAST(? AS uuid), ?, ?, ?, ?, ?, ?)",
-                docId, kbId, "Legacy Doc", "READY", "READY", 10, Timestamp.valueOf(LocalDateTime.now()), Timestamp.valueOf(LocalDateTime.now()));
+                docId, kbId, "Legacy Doc.md", "legacy_doc.md", "READY", 1, Timestamp.valueOf(LocalDateTime.now()), Timestamp.valueOf(LocalDateTime.now()));
+
+        String chunkId = UUID.randomUUID().toString();
+        jdbcTemplate.update("INSERT INTO chunk_bge_m3 (id, kb_id, doc_id, content, chunk_hash, chunk_index, document_version, created_at, updated_at) " +
+                "VALUES (CAST(? AS uuid), CAST(? AS uuid), CAST(? AS uuid), ?, ?, ?, ?, ?, ?)",
+                chunkId, kbId, docId, "Legacy Chunk Content", "dummy-hash", 0, 1, Timestamp.valueOf(LocalDateTime.now()), Timestamp.valueOf(LocalDateTime.now()));
 
         // 4. Migrate to latest
         Flyway flywayLatest = Flyway.configure().dataSource(dataSource).load();
