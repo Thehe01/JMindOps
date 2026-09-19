@@ -24,7 +24,6 @@ import java.util.regex.Pattern;
 
 @Component
 @ConditionalOnProperty(name = "app.tools.database.enabled", havingValue = "true")
-
 public class DataBaseTools implements Tool {
     private static final Logger log = LoggerFactory.getLogger(DataBaseTools.class);
 
@@ -37,7 +36,7 @@ public class DataBaseTools implements Tool {
             "(?i)\\b(insert|update|delete|merge|copy|alter|drop|create|grant|revoke|truncate|call|do|into|for\\s+update)\\b"
                     + "|(?i)\\b(pg_sleep|pg_read_file|pg_read_binary_file|pg_ls_dir|lo_import|lo_export|dblink|setval|nextval)\\s*\\(");
     private static final Pattern FORBIDDEN_TABLES = Pattern.compile(
-            "(?i)\\b(app_user|tool_approval|tool_audit_log|generation_task|flyway_schema_history|pg_shadow|pg_authid|pg_user)\\b");
+            "(?i)\\b(app_user|tool_approval|tool_audit_log|generation_task|document_index_task|flyway_schema_history|pg_shadow|pg_authid|pg_user)\\b");
     private static final Pattern FORBIDDEN_COLUMNS = Pattern.compile(
             "(?i)\\b(password_hash|salt|secret|api_key)\\b");
     private static final Pattern UNSAFE_IDENTIFIER_SYNTAX = Pattern.compile("(?i)U\\s*&\\s*\"|\"");

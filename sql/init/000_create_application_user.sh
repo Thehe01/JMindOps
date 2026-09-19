@@ -31,7 +31,8 @@ DECLARE
 BEGIN
     FOREACH application_table IN ARRAY ARRAY[
         'agent', 'chat_session', 'chat_message', 'knowledge_base', 'document',
-        'chunk_bge_m3', 'app_user', 'tool_approval', 'tool_audit_log', 'generation_task'
+        'chunk_bge_m3', 'app_user', 'tool_approval', 'tool_audit_log', 'generation_task',
+        'document_index_task'
     ]
     LOOP
         IF to_regclass('public.' || application_table) IS NOT NULL THEN

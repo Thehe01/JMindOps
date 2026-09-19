@@ -145,3 +145,16 @@ app:
     recovery-batch-size: ${GENERATION_RECOVERY_BATCH_SIZE:20}
     recovery-initial-delay-ms: ${GENERATION_RECOVERY_INITIAL_DELAY_MS:15000}
     recovery-fixed-delay-ms: ${GENERATION_RECOVERY_FIXED_DELAY_MS:15000}
+  document-index:
+    max-retries: ${DOCUMENT_INDEX_MAX_RETRIES:3}
+    initial-backoff-seconds: ${DOCUMENT_INDEX_INITIAL_BACKOFF_SECONDS:2}
+    backoff-multiplier: ${DOCUMENT_INDEX_BACKOFF_MULTIPLIER:2.0}
+    max-backoff-seconds: ${DOCUMENT_INDEX_MAX_BACKOFF_SECONDS:60}
+    running-timeout-seconds: ${DOCUMENT_INDEX_RUNNING_TIMEOUT_SECONDS:120}
+    batch-size: ${DOCUMENT_INDEX_BATCH_SIZE:10}
+    recovery-initial-delay-ms: ${DOCUMENT_INDEX_RECOVERY_INITIAL_DELAY_MS:10000}
+    recovery-fixed-delay-ms: ${DOCUMENT_INDEX_RECOVERY_FIXED_DELAY_MS:10000}
+    worker-threads: ${DOCUMENT_INDEX_WORKER_THREADS:2}
+    worker-initial-delay-ms: ${DOCUMENT_INDEX_WORKER_INITIAL_DELAY_MS:5000}
+    worker-poll-fixed-delay-ms: ${DOCUMENT_INDEX_WORKER_POLL_FIXED_DELAY_MS:5000}
+

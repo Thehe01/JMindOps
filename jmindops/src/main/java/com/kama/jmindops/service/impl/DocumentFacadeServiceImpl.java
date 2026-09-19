@@ -22,6 +22,12 @@ import com.kama.jmindops.service.IncrementalDocumentIndexService;
 import com.kama.jmindops.service.DocumentParserService;
 import com.kama.jmindops.service.DocumentStorageService;
 import com.kama.jmindops.service.MarkdownParserService;
+import com.kama.jmindops.model.entity.DocumentIndexTask;
+import com.kama.jmindops.model.entity.DocumentIndexTaskStatus;
+import com.kama.jmindops.service.DocumentIndexTaskStore;
+import com.kama.jmindops.service.DocumentIndexTaskWorker;
+import com.kama.jmindops.service.IndexRetryPolicy;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -35,6 +41,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -67,7 +74,37 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
     private final DocumentParserService documentParserService;
     private final IncrementalDocumentIndexService incrementalIndexService;
     private final ResourceAccessService resourceAccessService;
-    public DocumentFacadeServiceImpl(DocumentMapper documentMapper, DocumentConverter documentConverter, DocumentStorageService documentStorageService, MarkdownParserService markdownParserService, DocumentParserService documentParserService, IncrementalDocumentIndexService incrementalIndexService, ResourceAccessService resourceAccessService) {
+    private final DocumentIndexTaskStore documentIndexTaskStore;
+    private final DocumentIndexTaskWorker documentIndexTaskWorker;
+    private final IndexRetryPolicy indexRetryPolicy;
+
+    public DocumentFacadeServiceImpl(
+            DocumentMapper documentMapper,
+            DocumentConverter documentConverter,
+            DocumentStorageService documentStorageService,
+            MarkdownParserService markdownParserService,
+            DocumentParserService documentParserService,
+            IncrementalDocumentIndexService incrementalIndexService,
+            ResourceAccessService resourceAccessService
+    ) {
+        this(documentMapper, documentConverter, documentStorageService, markdownParserService,
+                documentParserService, incrementalIndexService, resourceAccessService,
+                null, null, null);
+    }
+
+    @Autowired
+    public DocumentFacadeServiceImpl(
+            DocumentMapper documentMapper,
+            DocumentConverter documentConverter,
+            DocumentStorageService documentStorageService,
+            MarkdownParserService markdownParserService,
+            DocumentParserService documentParserService,
+            IncrementalDocumentIndexService incrementalIndexService,
+            ResourceAccessService resourceAccessService,
+            DocumentIndexTaskStore documentIndexTaskStore,
+            DocumentIndexTaskWorker documentIndexTaskWorker,
+            IndexRetryPolicy indexRetryPolicy
+    ) {
         this.documentMapper = documentMapper;
         this.documentConverter = documentConverter;
         this.documentStorageService = documentStorageService;
@@ -75,8 +112,10 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
         this.documentParserService = documentParserService;
         this.incrementalIndexService = incrementalIndexService;
         this.resourceAccessService = resourceAccessService;
+        this.documentIndexTaskStore = documentIndexTaskStore;
+        this.documentIndexTaskWorker = documentIndexTaskWorker;
+        this.indexRetryPolicy = indexRetryPolicy;
     }
-
 
     @Override
     public GetDocumentsResponse getDocuments() {
@@ -185,19 +224,99 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
             }
 
             boolean newDocument = existing == null;
+            String documentId;
+            int nextVersion;
+
+            if (documentIndexTaskStore != null) {
+                Optional<DocumentIndexTask> activeTaskOpt =
+                        documentIndexTaskStore.findLatestActiveByKbIdAndSourceKey(kbId, sourceKey);
+                if (activeTaskOpt.isPresent()) {
+                    DocumentIndexTask activeTask = activeTaskOpt.get();
+                    if (contentHash.equals(activeTask.getContentHash())
+                            && indexFingerprint.equals(activeTask.getIndexFingerprint())) {
+                        log.info("文档存在进行中的相同索引任务，跳过重复创建: kbId={}, documentId={}, taskId={}",
+                                kbId, activeTask.getDocumentId(), activeTask.getId());
+                        return CreateDocumentResponse.builder()
+                                .documentId(activeTask.getDocumentId())
+                                .indexAction("UNCHANGED")
+                                .indexVersion(activeTask.getIndexVersion())
+                                .chunkCount(0)
+                                .reusedChunkCount(0)
+                                .embeddedChunkCount(0)
+                                .build();
+                    }
+                    // In-flight task exists for this logical document: reuse its documentId and advance version
+                    documentId = activeTask.getDocumentId();
+                    nextVersion = activeTask.getIndexVersion() + 1;
+                    newDocument = false;
+                } else if (newDocument) {
+                    documentId = UUID.randomUUID().toString();
+                    nextVersion = 1;
+                } else {
+                    documentId = existing.getId();
+                    nextVersion = existing.getIndexVersion() == null ? 1 : existing.getIndexVersion() + 1;
+                }
+            } else {
+                if (newDocument) {
+                    documentId = UUID.randomUUID().toString();
+                    nextVersion = 1;
+                } else {
+                    documentId = existing.getId();
+                    nextVersion = existing.getIndexVersion() == null ? 1 : existing.getIndexVersion() + 1;
+                }
+            }
+
             LocalDateTime now = LocalDateTime.now();
-            Document document = newDocument ? new Document() : existing;
+            Document document = newDocument ? new Document() : (existing != null ? existing : new Document());
+            document.setId(documentId);
+            document.setKbId(kbId);
             if (newDocument) {
-                document.setId(UUID.randomUUID().toString());
-                document.setKbId(kbId);
                 document.setCreatedAt(now);
             }
             String oldFilePath = storedFilePath(existing);
-            int nextVersion = newDocument || existing.getIndexVersion() == null
-                    ? 1
-                    : existing.getIndexVersion() + 1;
 
-            newFilePath = documentStorageService.saveFile(kbId, document.getId(), file);
+            newFilePath = documentStorageService.saveFile(kbId, documentId, file);
+
+            if (documentIndexTaskStore != null) {
+                DocumentIndexTask task = DocumentIndexTask.builder()
+                        .id(UUID.randomUUID().toString())
+                        .kbId(kbId)
+                        .documentId(documentId)
+                        .indexVersion(nextVersion)
+                        .status(DocumentIndexTaskStatus.PENDING)
+                        .retryCount(0)
+                        .maxRetries(indexRetryPolicy != null ? indexRetryPolicy.getMaxRetries() : 3)
+                        .filePath(newFilePath)
+                        .filename(originalFilename)
+                        .filetype(filetype)
+                        .fileSize(fileSize)
+                        .contentHash(contentHash)
+                        .sourceKey(sourceKey)
+                        .indexFingerprint(indexFingerprint)
+                        .isNewDocument(newDocument)
+                        .oldFilePath(oldFilePath)
+                        .createdAt(now)
+                        .updatedAt(now)
+                        .build();
+
+                documentIndexTaskStore.createTask(task);
+                if (documentIndexTaskWorker != null) {
+                    documentIndexTaskWorker.triggerAsync();
+                }
+
+                log.info("文档持久异步索引任务已创建: kbId={}, documentId={}, taskId={}, version={}",
+                        kbId, documentId, task.getId(), nextVersion);
+
+                return CreateDocumentResponse.builder()
+                        .documentId(documentId)
+                        .indexAction(newDocument ? "CREATED" : "UPDATED")
+                        .indexVersion(nextVersion)
+                        .chunkCount(0)
+                        .reusedChunkCount(0)
+                        .embeddedChunkCount(0)
+                        .build();
+            }
+
             List<IncrementalDocumentIndexService.ChunkInput> chunks = parseDocument(newFilePath, filetype);
             if (chunks.isEmpty()) {
                 throw new BizException("文档中没有可索引的文本内容");
@@ -262,6 +381,14 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
             }
         } catch (Exception e) {
             log.warn("读取文档存储信息失败，继续删除文档记录: documentId={}", documentId);
+        }
+
+        if (documentIndexTaskStore != null) {
+            try {
+                documentIndexTaskStore.deleteByDocumentId(documentId);
+            } catch (Exception e) {
+                log.warn("清理文档任务记录失败: documentId={}", documentId);
+            }
         }
 
         // 先删除数据库及级联 chunk
