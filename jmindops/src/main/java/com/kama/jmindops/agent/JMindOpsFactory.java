@@ -57,6 +57,8 @@ public class JMindOpsFactory {
     private final ToolGovernanceService toolGovernanceService;
     private final ExternalToolRegistry externalToolRegistry;
     private final Duration llmStreamTimeout;
+    private final com.kama.jmindops.service.AgentCheckpointStore checkpointStore;
+    private final com.kama.jmindops.agent.tools.ToolIdempotencyResolver toolIdempotencyResolver;
 
     public JMindOpsFactory(
             ChatClientRegistry chatClientRegistry,
@@ -74,6 +76,31 @@ public class JMindOpsFactory {
             ExternalToolRegistry externalToolRegistry,
             @Value("${app.agent.llm-stream-timeout-seconds:120}") long llmStreamTimeoutSeconds
     ) {
+        this(chatClientRegistry, sseService, agentConverter, knowledgeBaseMapper, knowledgeBaseConverter,
+                toolFacadeService, chatMessageFacadeService, chatMessageConverter, eventPublisher,
+                resourceAccessService, agentTraceStore, toolGovernanceService, externalToolRegistry,
+                llmStreamTimeoutSeconds, null, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public JMindOpsFactory(
+            ChatClientRegistry chatClientRegistry,
+            SseService sseService,
+            AgentConverter agentConverter,
+            KnowledgeBaseMapper knowledgeBaseMapper,
+            KnowledgeBaseConverter knowledgeBaseConverter,
+            ToolFacadeService toolFacadeService,
+            ChatMessageFacadeService chatMessageFacadeService,
+            ChatMessageConverter chatMessageConverter,
+            ApplicationEventPublisher eventPublisher,
+            ResourceAccessService resourceAccessService,
+            AgentTraceStore agentTraceStore,
+            ToolGovernanceService toolGovernanceService,
+            ExternalToolRegistry externalToolRegistry,
+            @Value("${app.agent.llm-stream-timeout-seconds:120}") long llmStreamTimeoutSeconds,
+            @org.springframework.beans.factory.annotation.Autowired(required = false) com.kama.jmindops.service.AgentCheckpointStore checkpointStore,
+            @org.springframework.beans.factory.annotation.Autowired(required = false) com.kama.jmindops.agent.tools.ToolIdempotencyResolver toolIdempotencyResolver
+    ) {
         this.chatClientRegistry = chatClientRegistry;
         this.sseService = sseService;
         this.agentConverter = agentConverter;
@@ -87,6 +114,8 @@ public class JMindOpsFactory {
         this.agentTraceStore = agentTraceStore;
         this.toolGovernanceService = toolGovernanceService;
         this.externalToolRegistry = externalToolRegistry;
+        this.checkpointStore = checkpointStore;
+        this.toolIdempotencyResolver = toolIdempotencyResolver;
         if (llmStreamTimeoutSeconds < 1 || llmStreamTimeoutSeconds > 1800) {
             throw new IllegalArgumentException("app.agent.llm-stream-timeout-seconds 必须在 1 到 1800 之间");
         }
@@ -261,7 +290,9 @@ public class JMindOpsFactory {
             String generationId,
             RoutingDecision decision,
             String userMessage,
-            AgentExecutionPolicy.Plan executionPlan
+            AgentExecutionPolicy.Plan executionPlan,
+            String workerId,
+            long leaseVersion
     ) {
         ChatClient chatClient = chatClientRegistry.get(agent.getModel());
         if (Objects.isNull(chatClient)) {
@@ -286,13 +317,15 @@ public class JMindOpsFactory {
                 decision,
                 userMessage,
                 executionPlan,
-                llmStreamTimeout
+                llmStreamTimeout,
+                checkpointStore,
+                toolIdempotencyResolver,
+                workerId,
+                leaseVersion
         );
     }
 
     void applyRoutingDecision(Agent agent, AgentDTO agentConfig, RoutingDecision decision) {
-        if (decision == null) return;
-
         log.info("[Multi-Agent Router] Applying decision: {} to Agent: {}", decision.name(), agent.getName());
 
         // 1. 动态覆盖人设
@@ -342,6 +375,18 @@ public class JMindOpsFactory {
             RoutingDecision decision,
             String generationId,
             String userMessage
+    ) {
+        return create(agentId, chatSessionId, decision, generationId, userMessage, "default-worker", 1L);
+    }
+
+    public JMindOps create(
+            String agentId,
+            String chatSessionId,
+            RoutingDecision decision,
+            String generationId,
+            String userMessage,
+            String workerId,
+            long leaseVersion
     ) {
         Agent agent = resourceAccessService.requireOwnedAgent(agentId);
         ChatSession chatSession = resourceAccessService.requireOwnedChatSession(chatSessionId);
@@ -412,8 +457,32 @@ public class JMindOpsFactory {
                 generationId,
                 decision,
                 userMessage,
-                executionPlan
+                executionPlan,
+                workerId,
+                leaseVersion
         );
+    }
+
+    public JMindOps createForResume(
+            com.kama.jmindops.model.entity.GenerationTask task,
+            String workerId,
+            long leaseVersion
+    ) {
+        RoutingDecision decision = RoutingDecision.CHAT;
+        if (checkpointStore != null) {
+            java.util.Optional<com.kama.jmindops.model.entity.AgentCheckpoint> latestOpt =
+                    checkpointStore.findLatestCheckpoint(task.id());
+            if (latestOpt.isPresent()) {
+                com.kama.jmindops.agent.checkpoint.CheckpointPayload.CheckpointRuntimeState rs =
+                        com.kama.jmindops.agent.checkpoint.CheckpointPayload.deserializeRuntimeState(latestOpt.get().runtimeState());
+                if (rs.routingDecision() != null) {
+                    try {
+                        decision = RoutingDecision.valueOf(rs.routingDecision());
+                    } catch (Exception ignored) {}
+                }
+            }
+        }
+        return create(task.agentId(), task.sessionId(), decision, task.id(), task.inputContent(), workerId, leaseVersion);
     }
 
     private void validateAndDefaultChatOptions(AgentDTO agentConfig) {

@@ -1,5 +1,6 @@
 package com.kama.jmindops.service;
 
+import com.kama.jmindops.exception.StaleGenerationLeaseException;
 import com.kama.jmindops.model.entity.GenerationTask;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -26,7 +27,8 @@ public class GenerationTaskStore {
                    gt.request_id, gt.request_fingerprint, gt.agent_id, gt.session_id,
                    gt.user_message_id, gt.input_content, gt.status, gt.attempt_count,
                    gt.last_error, gt.last_dispatched_at, gt.heartbeat_at, gt.started_at,
-                   gt.completed_at, gt.created_at, gt.updated_at
+                   gt.completed_at, gt.created_at, gt.updated_at,
+                   gt.worker_id, gt.lease_version
             FROM generation_task gt
             JOIN app_user au ON au.id = gt.user_id
             """;
@@ -90,13 +92,67 @@ public class GenerationTaskStore {
         return queryOne(SELECT_COLUMNS + " WHERE gt.id = CAST(? AS uuid)", generationId);
     }
 
+    public Optional<GenerationTask> findWaitingApprovalForSession(String sessionId) {
+        return queryOne(SELECT_COLUMNS + " WHERE gt.session_id = CAST(? AS uuid) AND gt.status = 'WAITING_APPROVAL' ORDER BY gt.created_at DESC LIMIT 1",
+                sessionId);
+    }
+
+    public long claimForExecution(String generationId, String workerId) {
+        List<Long> versions = jdbcTemplate.query("""
+                UPDATE generation_task
+                SET status = 'RUNNING',
+                    attempt_count = attempt_count + 1,
+                    worker_id = ?,
+                    lease_version = lease_version + 1,
+                    started_at = COALESCE(started_at, NOW()),
+                    heartbeat_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = CAST(? AS uuid) AND status = 'PENDING'
+                RETURNING lease_version
+                """, (rs, rowNum) -> rs.getLong("lease_version"), workerId, generationId);
+        if (versions.isEmpty()) {
+            throw new IllegalStateException("Task cannot be claimed for execution: generationId=" + generationId);
+        }
+        return versions.get(0);
+    }
+
+    public boolean markRunning(String generationId, String workerId) {
+        return jdbcTemplate.update("""
+                UPDATE generation_task
+                SET status = 'RUNNING', attempt_count = attempt_count + 1,
+                    worker_id = ?, lease_version = lease_version + 1,
+                    started_at = COALESCE(started_at, NOW()), heartbeat_at = NOW(), updated_at = NOW()
+                WHERE id = CAST(? AS uuid) AND status = 'PENDING'
+                """, workerId, generationId) == 1;
+    }
+
     public boolean markRunning(String generationId) {
         return jdbcTemplate.update("""
                 UPDATE generation_task
                 SET status = 'RUNNING', attempt_count = attempt_count + 1,
+                    worker_id = COALESCE(worker_id, 'default-worker'),
+                    lease_version = CASE WHEN lease_version = 0 THEN 1 ELSE lease_version END,
                     started_at = COALESCE(started_at, NOW()), heartbeat_at = NOW(), updated_at = NOW()
                 WHERE id = CAST(? AS uuid) AND status = 'PENDING'
                 """, generationId) == 1;
+    }
+
+    public long claimForResume(String generationId, String workerId) {
+        List<Long> versions = jdbcTemplate.query("""
+                UPDATE generation_task
+                SET status = 'RUNNING',
+                    worker_id = ?,
+                    lease_version = lease_version + 1,
+                    heartbeat_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = CAST(? AS uuid)
+                  AND status IN ('RUNNING', 'WAITING_APPROVAL')
+                RETURNING lease_version
+                """, (rs, rowNum) -> rs.getLong("lease_version"), workerId, generationId);
+        if (versions.isEmpty()) {
+            throw new IllegalStateException("Task cannot be claimed for resume: generationId=" + generationId);
+        }
+        return versions.get(0);
     }
 
     public void touchHeartbeat(String generationId) {
@@ -106,13 +162,53 @@ public class GenerationTaskStore {
                 """, generationId);
     }
 
+    public boolean touchHeartbeat(String generationId, String workerId, long leaseVersion) {
+        return jdbcTemplate.update("""
+                UPDATE generation_task SET heartbeat_at = NOW(), updated_at = NOW()
+                WHERE id = CAST(? AS uuid) AND status = 'RUNNING'
+                  AND (worker_id = ? OR worker_id IS NULL)
+                  AND lease_version = ?
+                """, generationId, workerId, leaseVersion) == 1;
+    }
+
     public boolean markSucceeded(String generationId) {
         return jdbcTemplate.update("""
                 UPDATE generation_task
-                SET status = 'SUCCEEDED', completed_at = NOW(), heartbeat_at = NOW(),
+                SET status = 'SUCCEEDED', completed_at = COALESCE(completed_at, NOW()), heartbeat_at = NOW(),
                     last_error = NULL, updated_at = NOW()
-                WHERE id = CAST(? AS uuid) AND status = 'RUNNING'
+                WHERE id = CAST(? AS uuid) AND status IN ('RUNNING', 'SUCCEEDED')
                 """, generationId) == 1;
+    }
+
+    public boolean markSucceeded(String generationId, String workerId, long leaseVersion) {
+        int updated = jdbcTemplate.update("""
+                UPDATE generation_task
+                SET status = 'SUCCEEDED', completed_at = COALESCE(completed_at, NOW()), heartbeat_at = NOW(),
+                    last_error = NULL, updated_at = NOW()
+                WHERE id = CAST(? AS uuid) AND status IN ('RUNNING', 'SUCCEEDED')
+                  AND (worker_id = ? OR worker_id IS NULL)
+                  AND lease_version = ?
+                """, generationId, workerId, leaseVersion);
+        if (updated == 0) {
+            throw new StaleGenerationLeaseException("Mark succeeded rejected by fencing: generationId="
+                    + generationId + ", workerId=" + workerId + ", leaseVersion=" + leaseVersion);
+        }
+        return true;
+    }
+
+    public boolean markWaitingApproval(String generationId, String workerId, long leaseVersion) {
+        int updated = jdbcTemplate.update("""
+                UPDATE generation_task
+                SET status = 'WAITING_APPROVAL', heartbeat_at = NOW(), updated_at = NOW()
+                WHERE id = CAST(? AS uuid) AND status IN ('RUNNING', 'WAITING_APPROVAL')
+                  AND (worker_id = ? OR worker_id IS NULL)
+                  AND lease_version = ?
+                """, generationId, workerId, leaseVersion);
+        if (updated == 0) {
+            throw new StaleGenerationLeaseException("Mark waiting approval rejected by fencing: generationId="
+                    + generationId + ", workerId=" + workerId + ", leaseVersion=" + leaseVersion);
+        }
+        return true;
     }
 
     public boolean markFailed(String generationId, String errorMessage) {
@@ -120,8 +216,19 @@ public class GenerationTaskStore {
                 UPDATE generation_task
                 SET status = 'FAILED', completed_at = NOW(), heartbeat_at = NOW(),
                     last_error = ?, updated_at = NOW()
-                WHERE id = CAST(? AS uuid) AND status IN ('PENDING', 'RUNNING')
+                WHERE id = CAST(? AS uuid) AND status IN ('PENDING', 'RUNNING', 'WAITING_APPROVAL')
                 """, sanitizeError(errorMessage), generationId) == 1;
+    }
+
+    public boolean markFailed(String generationId, String workerId, long leaseVersion, String errorMessage) {
+        return jdbcTemplate.update("""
+                UPDATE generation_task
+                SET status = 'FAILED', completed_at = NOW(), heartbeat_at = NOW(),
+                    last_error = ?, updated_at = NOW()
+                WHERE id = CAST(? AS uuid) AND status IN ('PENDING', 'RUNNING', 'WAITING_APPROVAL')
+                  AND (worker_id = ? OR worker_id IS NULL)
+                  AND (lease_version = ? OR lease_version = 0)
+                """, sanitizeError(errorMessage), generationId, workerId, leaseVersion) == 1;
     }
 
     public boolean markDispatched(String generationId) {
@@ -162,7 +269,8 @@ public class GenerationTaskStore {
                        updated.request_id, updated.request_fingerprint, updated.agent_id, updated.session_id,
                        updated.user_message_id, updated.input_content, updated.status, updated.attempt_count,
                        updated.last_error, updated.last_dispatched_at, updated.heartbeat_at, updated.started_at,
-                       updated.completed_at, updated.created_at, updated.updated_at
+                       updated.completed_at, updated.created_at, updated.updated_at,
+                       updated.worker_id, updated.lease_version
                 FROM updated
                 JOIN app_user au ON au.id = updated.user_id
                 """, ROW_MAPPER, timeout.toSeconds(), limit);
@@ -173,7 +281,7 @@ public class GenerationTaskStore {
         return tasks.stream().findFirst();
     }
 
-    static String sanitizeError(String message) {
+    public static String sanitizeError(String message) {
         if (message == null || message.isBlank()) {
             return "Agent 执行失败";
         }
@@ -209,6 +317,8 @@ public class GenerationTaskStore {
             timestamp(rs, "started_at"),
             timestamp(rs, "completed_at"),
             timestamp(rs, "created_at"),
-            timestamp(rs, "updated_at")
+            timestamp(rs, "updated_at"),
+            rs.getString("worker_id"),
+            rs.getLong("lease_version")
     );
 }

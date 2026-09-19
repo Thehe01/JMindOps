@@ -95,6 +95,11 @@ public class ChatEventListener {
                     task.agentId(), sessionId, decision, generationId, rewrittenInput);
             generationTaskStore.touchHeartbeat(generationId);
             jMindOps.run();
+            if (jMindOps.getAgentState() == com.kama.jmindops.agent.AgentState.WAITING_APPROVAL) {
+                log.info("Generation suspended waiting for approval: sessionId={}, generationId={}",
+                        sessionId, generationId);
+                return;
+            }
             if (generationTaskStore.markSucceeded(generationId)) {
                 sendTerminal(sessionId, generationId, SseMessage.Type.AI_DONE, "生成完成");
             } else {
@@ -103,12 +108,17 @@ public class ChatEventListener {
             }
         } catch (Exception e) {
             log.error("Agent generation failed: sessionId={}, generationId={}", sessionId, generationId, e);
-            try {
-                generationTaskStore.markFailed(generationId, e.getMessage());
-            } catch (Exception persistenceError) {
-                log.error("Failed to persist generation failure: generationId={}", generationId, persistenceError);
+            if (!(e instanceof com.kama.jmindops.exception.StaleGenerationLeaseException)) {
+                try {
+                    generationTaskStore.markFailed(generationId, e.getMessage());
+                } catch (Exception persistenceError) {
+                    log.error("Failed to persist generation failure: generationId={}", generationId, persistenceError);
+                }
+                sendTerminal(sessionId, generationId, SseMessage.Type.AI_ERROR, "生成失败，请稍后重试");
+            } else {
+                log.warn("Worker lease expired or displaced by another worker, skipping markFailed: generationId={}",
+                        generationId);
             }
-            sendTerminal(sessionId, generationId, SseMessage.Type.AI_ERROR, "生成失败，请稍后重试");
         } finally {
             SecurityContextHolder.setContext(previousContext);
             if (claimed) {

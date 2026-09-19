@@ -1,15 +1,21 @@
 package com.kama.jmindops.agent;
 
-
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.kama.jmindops.agent.checkpoint.CheckpointPayload;
+import com.kama.jmindops.agent.tools.ToolIdempotencyResolver;
+import com.kama.jmindops.event.AgentMessageGeneratedEvent;
+import com.kama.jmindops.exception.NonIdempotentToolReplayException;
+import com.kama.jmindops.governance.ToolApprovalSignal;
+import com.kama.jmindops.governance.ToolExecutionContext;
+import com.kama.jmindops.model.dto.KnowledgeBaseDTO;
+import com.kama.jmindops.model.entity.AgentCheckpoint;
+import com.kama.jmindops.model.entity.AgentToolExecution;
+import com.kama.jmindops.model.entity.GenerationTask;
+import com.kama.jmindops.service.AgentCheckpointStore;
+import com.kama.jmindops.service.AgentTraceStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import com.kama.jmindops.event.AgentMessageGeneratedEvent;
-import com.kama.jmindops.governance.ToolExecutionContext;
-import com.kama.jmindops.governance.ToolApprovalSignal;
-import com.kama.jmindops.model.dto.KnowledgeBaseDTO;
-import com.kama.jmindops.service.AgentTraceStore;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.MessageWindowChatMemory;
@@ -32,16 +38,16 @@ import org.springframework.util.StringUtils;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.List;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
-
 
 public class JMindOps {
     private static final Logger log = LoggerFactory.getLogger(JMindOps.class);
@@ -89,7 +95,7 @@ public class JMindOps {
     private String chatSessionId;
     // 单次生成标识，用于隔离同一会话中的 SSE 事件
     private String generationId;
-    // SpringAI 自带的 ChatOptions, 不是 AgentDTO.ChatOptions
+    // SpringAI 自带的 ChatOptions
     private ChatOptions chatOptions;
     // 事件发布器
     private ApplicationEventPublisher eventPublisher;
@@ -97,8 +103,16 @@ public class JMindOps {
     private ChatResponse lastChatResponse;
     // 持久化 Agent 每一步和工具调用的脱敏 Trace
     private AgentTraceStore agentTraceStore;
-    // 单次模型响应流超时；云端推理的尾延迟可能明显高于本地模型。
+    // 单次模型响应流超时
     private Duration llmStreamTimeout = DEFAULT_LLM_STREAM_TIMEOUT;
+
+    // P0-2: Checkpoint & Execution Ledger
+    private AgentCheckpointStore checkpointStore;
+    private ToolIdempotencyResolver toolIdempotencyResolver;
+    private String workerId = "default-worker";
+    private long leaseVersion = 1L;
+    private long checkpointVersion = 0L;
+    private List<ToolResponseMessage.ToolResponse> lastToolResponses = new ArrayList<>();
 
     public JMindOps() {
     }
@@ -122,6 +136,37 @@ public class JMindOps {
                      String requiredKnowledgeQuery,
                      AgentExecutionPolicy.Plan executionPlan,
                      Duration llmStreamTimeout
+    ) {
+        this(agentId, name, description, systemPrompt, chatClient, maxMessages,
+                temperature, topP, memory, availableTools, availableKbs, chatSessionId,
+                generationId, eventPublisher, agentTraceStore, routingDecision,
+                requiredKnowledgeQuery, executionPlan, llmStreamTimeout,
+                null, null, "default-worker", 1L);
+    }
+
+    public JMindOps(String agentId,
+                     String name,
+                     String description,
+                     String systemPrompt,
+                     ChatClient chatClient,
+                     Integer maxMessages,
+                     Double temperature,
+                     Double topP,
+                     List<Message> memory,
+                     List<ToolCallback> availableTools,
+                     List<KnowledgeBaseDTO> availableKbs,
+                     String chatSessionId,
+                     String generationId,
+                     ApplicationEventPublisher eventPublisher,
+                     AgentTraceStore agentTraceStore,
+                     RoutingDecision routingDecision,
+                     String requiredKnowledgeQuery,
+                     AgentExecutionPolicy.Plan executionPlan,
+                     Duration llmStreamTimeout,
+                     AgentCheckpointStore checkpointStore,
+                     ToolIdempotencyResolver toolIdempotencyResolver,
+                     String workerId,
+                     long leaseVersion
     ) {
         this.agentId = agentId;
         this.name = name;
@@ -147,6 +192,11 @@ public class JMindOps {
         this.llmStreamTimeout = llmStreamTimeout == null
                 ? DEFAULT_LLM_STREAM_TIMEOUT
                 : llmStreamTimeout;
+
+        this.checkpointStore = checkpointStore;
+        this.toolIdempotencyResolver = toolIdempotencyResolver;
+        this.workerId = workerId != null ? workerId : "default-worker";
+        this.leaseVersion = leaseVersion;
 
         this.agentState = AgentState.IDLE;
 
@@ -175,6 +225,26 @@ public class JMindOps {
 
         // 工具调用管理器
         this.toolCallingManager = ToolCallingManager.builder().build();
+    }
+
+    public AgentState getAgentState() {
+        return this.agentState;
+    }
+
+    public String getGenerationId() {
+        return this.generationId;
+    }
+
+    public long getCumulativeTokens() {
+        return this.cumulativeTokens;
+    }
+
+    public long getLeaseVersion() {
+        return this.leaseVersion;
+    }
+
+    public String getWorkerId() {
+        return this.workerId;
     }
 
     // 打印工具调用信息
@@ -206,8 +276,6 @@ public class JMindOps {
     }
 
     private boolean think(String stepTraceId) {
-        // ChatClient 的请求构建器会合并工具回调；每一步先显式覆盖底层选项，
-        // 确保计划完成后的空工具集不会沿用上一步的回调。
         synchronizeToolCallbacks();
         String ragGroundingInstruction = routingDecision == RoutingDecision.RAG
                 ? RagAnswerPolicy.groundingInstruction()
@@ -248,7 +316,6 @@ public class JMindOps {
         java.util.Map<String, String> toolCallNames = new LinkedHashMap<>();
         org.springframework.ai.chat.metadata.ChatResponseMetadata[] lastMetadata = new org.springframework.ai.chat.metadata.ChatResponseMetadata[1];
 
-        // 设定单次模型推流 60 秒超时限制，彻底杜绝工作线程永久卡死
         responseFlux.doOnNext(chunk -> {
             if (chunk.getMetadata() != null) {
                 lastMetadata[0] = chunk.getMetadata();
@@ -329,7 +396,7 @@ public class JMindOps {
         List<AssistantMessage.ToolCall> toolCalls = output.getToolCalls();
 
         saveMessage(output, usage, costTime, modelName);
-        if (this.agentTraceStore != null) {
+        if (this.agentTraceStore != null && stepTraceId != null) {
             this.agentTraceStore.completeThinking(
                     this.generationId, stepTraceId, output, usage, costTime, modelName);
         }
@@ -342,18 +409,36 @@ public class JMindOps {
         return !toolCalls.isEmpty();
     }
 
-    // 执行
-    private void execute(String stepTraceId) {
-        Assert.notNull(this.lastChatResponse, "Last chat client response cannot be null");
-
-        if (!this.lastChatResponse.hasToolCalls()) {
-            return;
+    private ToolCallback findCallback(String name) {
+        if (this.availableTools != null) {
+            for (ToolCallback callback : this.availableTools) {
+                if (callback.getToolDefinition() != null && name.equals(callback.getToolDefinition().name())) {
+                    return callback;
+                }
+            }
         }
+        if (this.runtimeTools != null) {
+            for (ToolCallback callback : this.runtimeTools) {
+                if (callback.getToolDefinition() != null && name.equals(callback.getToolDefinition().name())) {
+                    return callback;
+                }
+            }
+        }
+        return null;
+    }
 
-        Prompt prompt = Prompt.builder()
-                .messages(this.chatMemory.get(this.chatSessionId))
-                .chatOptions(this.chatOptions)
-                .build();
+    /**
+     * 执行当前步骤的所有工具调用，并基于执行账本 (Execution Ledger) 保障幂等性、崩溃恢复与审批挂起。
+     * @return true 如果进入人工审批挂起 (WAITING_APPROVAL)；false 正常完成
+     */
+    private boolean executeToolsWithLedger(
+            int stepNo,
+            String stepTraceId,
+            List<AssistantMessage.ToolCall> toolCalls
+    ) {
+        if (toolCalls == null || toolCalls.isEmpty()) {
+            return false;
+        }
 
         Set<String> allowedKnowledgeBaseIds = this.availableKbs == null
                 ? Collections.emptySet()
@@ -361,33 +446,124 @@ public class JMindOps {
                 .map(KnowledgeBaseDTO::getId)
                 .filter(Objects::nonNull)
                 .collect(Collectors.toUnmodifiableSet());
-        ToolExecutionContext.set(this.chatSessionId, allowedKnowledgeBaseIds);
-        ToolExecutionResult toolExecutionResult;
+        ToolExecutionContext.set(this.chatSessionId, this.generationId, allowedKnowledgeBaseIds);
+
         long startedAt = System.currentTimeMillis();
+        List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>();
+
         try {
-            toolExecutionResult = toolCallingManager.executeToolCalls(prompt, this.lastChatResponse);
+            for (AssistantMessage.ToolCall call : toolCalls) {
+                String toolCallId = call.id();
+                String toolName = call.name();
+                String arguments = call.arguments() == null ? "" : call.arguments();
+                ToolExecutionContext.setToolCallId(toolCallId);
+
+                // 1. 检查账本是否已有该调用的执行状态
+                if (checkpointStore != null) {
+                    Optional<AgentToolExecution> existingOpt = checkpointStore.findToolExecution(this.generationId, toolCallId);
+                    if (existingOpt.isPresent()) {
+                        AgentToolExecution existing = existingOpt.get();
+                        if (existing.status() == AgentToolExecution.Status.SUCCEEDED) {
+                            log.info("复用已落库工具结果（防止重复副作用）: generationId={}, toolCallId={}, tool={}",
+                                    this.generationId, toolCallId, toolName);
+                            responses.add(new ToolResponseMessage.ToolResponse(toolCallId, toolName, existing.result()));
+                            continue;
+                        } else if (existing.status() == AgentToolExecution.Status.WAITING_APPROVAL) {
+                            boolean isApproved = checkpointStore.isToolApprovalGranted(this.generationId, toolCallId, toolName);
+                            if (!isApproved) {
+                                log.info("工具调用处于 WAITING_APPROVAL 状态且尚未获批，保持等待，不重复发起: generationId={}, toolCallId={}, tool={}",
+                                        this.generationId, toolCallId, toolName);
+                                this.availableTools = Collections.emptyList();
+                                this.nextRequiredToolIndex = this.requiredToolSequence.size();
+                                this.agentState = AgentState.WAITING_APPROVAL;
+                                return true;
+                            }
+                        } else if (existing.status() == AgentToolExecution.Status.UNKNOWN) {
+                            boolean idempotent = existing.idempotent();
+                            if (!idempotent && toolIdempotencyResolver != null) {
+                                idempotent = toolIdempotencyResolver.isIdempotent(toolName, findCallback(toolName));
+                            }
+                            if (!idempotent) {
+                                log.error("非幂等外部工具处于 UNKNOWN 状态，禁止自动重试: generationId={}, toolCallId={}, tool={}",
+                                        this.generationId, toolCallId, toolName);
+                                throw new NonIdempotentToolReplayException(
+                                        "外部工具「" + toolName + "」为非幂等工具且处于 UNKNOWN 状态，可能已产生副作用，禁止自动重放，需人工对账确认。");
+                            }
+                        }
+                    }
+                    checkpointStore.markToolExecuting(this.generationId, toolCallId);
+                }
+
+                ToolCallback callback = findCallback(toolName);
+                String result;
+                try {
+                    if (callback != null) {
+                        org.springframework.ai.chat.model.ToolContext toolContext =
+                                new org.springframework.ai.chat.model.ToolContext(Map.of(
+                                        "tool_call_id", toolCallId,
+                                        "generation_id", this.generationId,
+                                        "idempotency_key", toolCallId
+                                ));
+                        result = callback.call(arguments, toolContext);
+                    } else {
+                        result = "错误：未找到可用的工具「" + toolName + "」";
+                    }
+                } catch (Exception e) {
+                    if (checkpointStore != null) {
+                        checkpointStore.markToolFailed(this.generationId, toolCallId, e.getMessage());
+                    }
+                    throw e;
+                }
+
+                result = result == null ? "" : result;
+
+                // 2. 检查是否触发审批
+                if (ToolApprovalSignal.isWaitingResponse(result)) {
+                    if (checkpointStore != null) {
+                        checkpointStore.markToolWaitingApproval(this.generationId, toolCallId, result);
+                        this.checkpointVersion++;
+                        commitCheckpoint(stepNo, AgentCheckpoint.Stage.WAITING_APPROVAL,
+                                GenerationTask.Status.WAITING_APPROVAL, toolCalls, responses);
+                    }
+                    this.availableTools = Collections.emptyList();
+                    this.nextRequiredToolIndex = this.requiredToolSequence.size();
+                    AssistantMessage waitingMessage = new AssistantMessage(ToolApprovalSignal.userFacingWaitingMessage());
+                    publishChunk(waitingMessage.getText());
+                    saveMessage(waitingMessage, null, 0L, "deterministic-approval-orchestrator");
+                    this.agentState = AgentState.WAITING_APPROVAL;
+                    log.info("工具进入待审批状态，安全挂起执行: sessionId={}, generationId={}",
+                            this.chatSessionId, this.generationId);
+                    return true;
+                }
+
+                if (checkpointStore != null) {
+                    checkpointStore.markToolSucceeded(this.generationId, toolCallId, result);
+                }
+                if (KNOWLEDGE_TOOL_NAME.equals(toolName)) {
+                    this.requiredKnowledgeRetrievalCompleted = true;
+                    this.retrievedSourceCount = RagAnswerPolicy.countSources(result);
+                }
+                responses.add(new ToolResponseMessage.ToolResponse(toolCallId, toolName, result));
+            }
         } finally {
             ToolExecutionContext.clear();
         }
 
-        this.chatMemory.clear(this.chatSessionId);
-        this.chatMemory.add(this.chatSessionId, toolExecutionResult.conversationHistory());
+        this.lastToolResponses = List.copyOf(responses);
+        ToolResponseMessage toolResponseMessage = ToolResponseMessage.builder()
+                .responses(responses)
+                .build();
 
-        ToolResponseMessage toolResponseMessage = (ToolResponseMessage) toolExecutionResult
-                .conversationHistory()
-                .get(toolExecutionResult.conversationHistory().size() - 1);
+        this.chatMemory.add(this.chatSessionId, toolResponseMessage);
 
-        String toolNames = toolResponseMessage.getResponses()
-                .stream()
+        String toolNames = responses.stream()
                 .map(ToolResponseMessage.ToolResponse::name)
                 .collect(Collectors.joining(","));
-
         log.info("工具调用完成: sessionId={}, generationId={}, toolCount={}, tools={}",
-                this.chatSessionId, this.generationId, toolResponseMessage.getResponses().size(), toolNames);
+                this.chatSessionId, this.generationId, responses.size(), toolNames);
 
-        // 保存工具调用
         saveMessage(toolResponseMessage, null, null, null);
-        if (this.agentTraceStore != null) {
+        if (this.agentTraceStore != null && stepTraceId != null) {
             this.agentTraceStore.completeTools(
                     this.generationId,
                     stepTraceId,
@@ -396,27 +572,66 @@ public class JMindOps {
             );
         }
 
-        boolean waitingForApproval = toolResponseMessage.getResponses().stream()
-                .anyMatch(response -> ToolApprovalSignal.isWaitingResponse(response.responseData()));
-        if (waitingForApproval) {
-            this.availableTools = Collections.emptyList();
-            this.nextRequiredToolIndex = this.requiredToolSequence.size();
-            AssistantMessage waitingMessage = new AssistantMessage(ToolApprovalSignal.userFacingWaitingMessage());
-            publishChunk(waitingMessage.getText());
-            saveMessage(waitingMessage, null, 0L, "deterministic-approval-orchestrator");
-            this.agentState = AgentState.FINISHED;
-            log.info("工具进入待审批状态，本轮撤销后续工具: sessionId={}, generationId={}",
-                    this.chatSessionId, this.generationId);
-        } else {
-            advanceExecutionPlan(toolResponseMessage);
-        }
+        advanceExecutionPlan(toolResponseMessage);
 
-        if (toolResponseMessage.getResponses()
-                .stream()
-                .anyMatch(resp -> resp.name().equals("terminate"))) {
+        if (responses.stream().anyMatch(resp -> resp.name().equals("terminate"))) {
             this.agentState = AgentState.FINISHED;
             log.info("任务结束");
         }
+
+        return false;
+    }
+
+    private void commitCheckpoint(
+            int stepNo,
+            AgentCheckpoint.Stage stage,
+            GenerationTask.Status status,
+            List<AssistantMessage.ToolCall> pendingToolCalls,
+            List<ToolResponseMessage.ToolResponse> toolResults
+    ) {
+        if (this.checkpointStore == null) {
+            return;
+        }
+        List<Message> currentMessages = this.chatMemory.get(this.chatSessionId);
+        String messagesPayload = CheckpointPayload.serializeMessages(currentMessages);
+        CheckpointPayload.CheckpointRuntimeState runtimeState = new CheckpointPayload.CheckpointRuntimeState(
+                this.routingDecision != null ? this.routingDecision.name() : null,
+                this.requiredToolSequence,
+                this.nextRequiredToolIndex,
+                this.requiredKnowledgeQuery,
+                this.requiredKnowledgeRetrievalCompleted,
+                this.retrievedSourceCount,
+                this.cumulativeTokens,
+                stepNo,
+                this.plannedToolRepairAttempts
+        );
+        String runtimeStateJson = CheckpointPayload.serializeRuntimeState(runtimeState);
+        String pendingCallsJson = pendingToolCalls != null ? CheckpointPayload.serializeToolCalls(pendingToolCalls) : null;
+        String resultsJson = null;
+        if (toolResults != null && !toolResults.isEmpty()) {
+            List<CheckpointPayload.CheckpointToolResponse> records = toolResults.stream()
+                    .map(tr -> new CheckpointPayload.CheckpointToolResponse(tr.id(), tr.name(), tr.responseData()))
+                    .toList();
+            try {
+                resultsJson = OBJECT_MAPPER.writeValueAsString(records);
+            } catch (JsonProcessingException ignored) {}
+        }
+
+        AgentCheckpoint checkpoint = new AgentCheckpoint(
+                UUID.randomUUID().toString(),
+                this.generationId,
+                stepNo,
+                this.checkpointVersion,
+                stage,
+                status,
+                messagesPayload,
+                runtimeStateJson,
+                pendingCallsJson,
+                resultsJson,
+                null,
+                null
+        );
+        this.checkpointStore.saveCheckpoint(checkpoint, this.workerId, this.leaseVersion);
     }
 
     // 单个步骤模板
@@ -427,16 +642,52 @@ public class JMindOps {
         boolean toolExecutionStarted = false;
         try {
             if (think(stepTraceId)) {
-                if (this.agentTraceStore != null) {
+                AssistantMessage output = this.lastChatResponse.getResult().getOutput();
+                this.chatMemory.add(this.chatSessionId, output);
+                List<AssistantMessage.ToolCall> toolCalls = output.getToolCalls();
+
+                // Safe Boundary 1: Persist model output & pending tool calls
+                if (this.checkpointStore != null) {
+                    for (AssistantMessage.ToolCall call : toolCalls) {
+                        boolean isIdempotent = toolIdempotencyResolver != null
+                                && toolIdempotencyResolver.isIdempotent(call.name(), findCallback(call.name()));
+                        this.checkpointStore.recordPreparedToolCall(this.generationId, stepNo, call, isIdempotent);
+                    }
+                    this.checkpointVersion++;
+                    commitCheckpoint(stepNo, AgentCheckpoint.Stage.MODEL_OUTPUT, GenerationTask.Status.RUNNING,
+                            toolCalls, null);
+                }
+
+                if (this.agentTraceStore != null && stepTraceId != null) {
                     this.agentTraceStore.markToolsRunning(this.generationId, stepTraceId);
                 }
                 toolExecutionStarted = true;
-                execute(stepTraceId);
-            } else { // 没有工具调用
+
+                // Safe Boundary 2: Execute tools with ledger
+                boolean suspended = executeToolsWithLedger(stepNo, stepTraceId, toolCalls);
+                if (suspended) {
+                    this.agentState = AgentState.WAITING_APPROVAL;
+                    return;
+                }
+
+                // Safe Boundary 3: Commit completed step
+                if (this.checkpointStore != null) {
+                    this.checkpointVersion++;
+                    commitCheckpoint(stepNo, AgentCheckpoint.Stage.STEP_COMPLETED, GenerationTask.Status.RUNNING,
+                            null, this.lastToolResponses);
+                }
+            } else { // 没有工具调用，生成最终回答
+                AssistantMessage output = this.lastChatResponse.getResult().getOutput();
+                this.chatMemory.add(this.chatSessionId, output);
                 agentState = AgentState.FINISHED;
+                if (this.checkpointStore != null) {
+                    this.checkpointVersion++;
+                    commitCheckpoint(stepNo, AgentCheckpoint.Stage.STEP_COMPLETED, GenerationTask.Status.SUCCEEDED,
+                            null, null);
+                }
             }
         } catch (RuntimeException exception) {
-            if (this.agentTraceStore != null) {
+            if (this.agentTraceStore != null && stepTraceId != null) {
                 try {
                     this.agentTraceStore.failStep(
                             this.generationId,
@@ -544,11 +795,19 @@ public class JMindOps {
 
             this.chatMemory.add(this.chatSessionId, toolCallMessage);
             saveMessage(toolCallMessage, null, 0L, "deterministic-rag-orchestrator");
-            if (this.agentTraceStore != null) {
+            if (this.agentTraceStore != null && stepTraceId != null) {
                 this.agentTraceStore.completeThinking(
                         this.generationId, stepTraceId, toolCallMessage, null, 0L,
                         "deterministic-rag-orchestrator");
                 this.agentTraceStore.markToolsRunning(this.generationId, stepTraceId);
+            }
+
+            // Checkpoint boundary 1
+            if (this.checkpointStore != null) {
+                this.checkpointStore.recordPreparedToolCall(this.generationId, stepNo, toolCall, true);
+                this.checkpointVersion++;
+                commitCheckpoint(stepNo, AgentCheckpoint.Stage.MODEL_OUTPUT, GenerationTask.Status.RUNNING,
+                        List.of(toolCall), null);
             }
 
             long startedAt = System.currentTimeMillis();
@@ -558,20 +817,27 @@ public class JMindOps {
                     .filter(Objects::nonNull)
                     .collect(Collectors.toUnmodifiableSet());
             String responseData;
-            ToolExecutionContext.set(this.chatSessionId, allowedKnowledgeBaseIds);
+            ToolExecutionContext.set(this.chatSessionId, this.generationId, allowedKnowledgeBaseIds);
             try {
+                if (this.checkpointStore != null) {
+                    this.checkpointStore.markToolExecuting(this.generationId, toolCallId);
+                }
                 responseData = knowledgeCallback.call(arguments);
+                responseData = responseData == null ? "" : responseData;
+                if (this.checkpointStore != null) {
+                    this.checkpointStore.markToolSucceeded(this.generationId, toolCallId, responseData);
+                }
             } finally {
                 ToolExecutionContext.clear();
             }
-            responseData = responseData == null ? "" : responseData;
+
             ToolResponseMessage responseMessage = ToolResponseMessage.builder()
                     .responses(List.of(new ToolResponseMessage.ToolResponse(
                             toolCallId, KNOWLEDGE_TOOL_NAME, responseData)))
                     .build();
             this.chatMemory.add(this.chatSessionId, responseMessage);
             saveMessage(responseMessage, null, null, null);
-            if (this.agentTraceStore != null) {
+            if (this.agentTraceStore != null && stepTraceId != null) {
                 this.agentTraceStore.completeTools(
                         this.generationId, stepTraceId, responseMessage,
                         System.currentTimeMillis() - startedAt);
@@ -582,8 +848,15 @@ public class JMindOps {
             restrictToolsToNextPlannedStep();
             log.info("RAG 强制检索完成: sessionId={}, generationId={}, knowledgeBaseId={}, sourceCount={}",
                     this.chatSessionId, this.generationId, knowledgeBase.getId(), retrievedSourceCount);
+
+            // Checkpoint boundary 3
+            if (this.checkpointStore != null) {
+                this.checkpointVersion++;
+                commitCheckpoint(stepNo, AgentCheckpoint.Stage.STEP_COMPLETED, GenerationTask.Status.RUNNING,
+                        null, List.of(new ToolResponseMessage.ToolResponse(toolCallId, KNOWLEDGE_TOOL_NAME, responseData)));
+            }
         } catch (RuntimeException exception) {
-            if (this.agentTraceStore != null) {
+            if (this.agentTraceStore != null && stepTraceId != null) {
                 this.agentTraceStore.failStep(
                         this.generationId, stepTraceId, exception.getMessage(), toolExecutionStarted);
             }
@@ -631,23 +904,95 @@ public class JMindOps {
         AssistantMessage response = new AssistantMessage(RagAnswerPolicy.INSUFFICIENT_EVIDENCE_MESSAGE);
         publishChunk(response.getText());
         saveMessage(response, null, 0L, "deterministic-rag-orchestrator");
-        if (this.agentTraceStore != null) {
+        if (this.agentTraceStore != null && stepTraceId != null) {
             this.agentTraceStore.completeThinking(
                     this.generationId, stepTraceId, response, null, 0L,
                     "deterministic-rag-orchestrator");
         }
         this.agentState = AgentState.FINISHED;
+        if (this.checkpointStore != null) {
+            this.checkpointVersion++;
+            commitCheckpoint(stepNo, AgentCheckpoint.Stage.STEP_COMPLETED, GenerationTask.Status.SUCCEEDED,
+                    null, null);
+        }
+    }
+
+    public void resume() {
+        run();
     }
 
     // 运行
     public void run() {
-        if (agentState != AgentState.IDLE) {
-            throw new IllegalStateException("Agent is not idle");
+        if (agentState != AgentState.IDLE && agentState != AgentState.WAITING_APPROVAL) {
+            throw new IllegalStateException("Agent is not idle or waiting approval, current state: " + agentState);
         }
 
         try {
             int nextStep = 1;
-            if (shouldPrefetchKnowledge()) {
+
+            if (checkpointStore != null) {
+                Optional<AgentCheckpoint> latestCheckpointOpt = checkpointStore.findLatestCheckpoint(this.generationId);
+                if (latestCheckpointOpt.isPresent()) {
+                    AgentCheckpoint latestCheckpoint = latestCheckpointOpt.get();
+                    log.info("从 Checkpoint 恢复执行: generationId={}, stepNo={}, version={}, stage={}",
+                            this.generationId, latestCheckpoint.stepNo(), latestCheckpoint.checkpointVersion(), latestCheckpoint.stage());
+
+                    // 1. 恢复工具状态：将遗留在 EXECUTING 状态的外部工具调用置为 UNKNOWN
+                    checkpointStore.reconcileExecutingToolsOnRecovery(this.generationId);
+
+                    // 2. 恢复 Message 记忆（无隐藏 CoT）
+                    List<Message> restoredMessages = CheckpointPayload.deserializeMessages(latestCheckpoint.messagesPayload());
+                    this.chatMemory.clear(this.chatSessionId);
+                    this.chatMemory.add(this.chatSessionId, restoredMessages);
+
+                    // 3. 恢复运行时控制状态
+                    CheckpointPayload.CheckpointRuntimeState runtimeState =
+                            CheckpointPayload.deserializeRuntimeState(latestCheckpoint.runtimeState());
+                    this.nextRequiredToolIndex = runtimeState.nextRequiredToolIndex();
+                    this.cumulativeTokens = runtimeState.cumulativeTokens();
+                    this.retrievedSourceCount = runtimeState.retrievedSourceCount();
+                    this.requiredKnowledgeRetrievalCompleted = runtimeState.requiredKnowledgeRetrievalCompleted();
+                    this.plannedToolRepairAttempts = runtimeState.plannedToolRepairAttempts();
+                    this.checkpointVersion = latestCheckpoint.checkpointVersion();
+                    restrictToolsToNextPlannedStep();
+
+                    int resumeStep = latestCheckpoint.stepNo();
+
+                    // 4. 根据最后安全 Checkpoint 阶段决定恢复入口
+                    if (latestCheckpoint.stage() == AgentCheckpoint.Stage.MODEL_OUTPUT
+                            || latestCheckpoint.stage() == AgentCheckpoint.Stage.WAITING_APPROVAL) {
+                        // 场景 A & 场景 D: 模型已返回 tool calls 但工具未完成 / 工具曾等待审批现已恢复
+                        List<AssistantMessage.ToolCall> pendingCalls =
+                                CheckpointPayload.deserializeToolCalls(latestCheckpoint.pendingToolCalls());
+                        String stepTraceId = this.agentTraceStore == null
+                                ? null
+                                : this.agentTraceStore.startStep(this.generationId, resumeStep);
+                        if (this.agentTraceStore != null && stepTraceId != null) {
+                            this.agentTraceStore.markToolsRunning(this.generationId, stepTraceId);
+                        }
+
+                        boolean suspended = executeToolsWithLedger(resumeStep, stepTraceId, pendingCalls);
+                        if (suspended) {
+                            this.agentState = AgentState.WAITING_APPROVAL;
+                            return;
+                        }
+
+                        this.checkpointVersion++;
+                        commitCheckpoint(resumeStep, AgentCheckpoint.Stage.STEP_COMPLETED,
+                                GenerationTask.Status.RUNNING, null, this.lastToolResponses);
+                        nextStep = resumeStep + 1;
+                    } else if (latestCheckpoint.stage() == AgentCheckpoint.Stage.STEP_COMPLETED) {
+                        nextStep = resumeStep + 1;
+                    } else {
+                        nextStep = 1;
+                    }
+                } else {
+                    // 首次执行：提交 INITIAL checkpoint
+                    commitCheckpoint(0, AgentCheckpoint.Stage.INITIAL, GenerationTask.Status.RUNNING, null, null);
+                }
+            }
+
+            if (nextStep == 1 && shouldPrefetchKnowledge()) {
                 if (!canPrefetchKnowledge()) {
                     finishWithoutEvidence(nextStep);
                     return;
@@ -658,16 +1003,20 @@ public class JMindOps {
                     return;
                 }
             }
+
             for (int currentStep = nextStep;
-                 currentStep <= MAX_STEPS && agentState != AgentState.FINISHED;
+                 currentStep <= MAX_STEPS && agentState != AgentState.FINISHED && agentState != AgentState.WAITING_APPROVAL;
                  currentStep++) {
                 step(currentStep);
-                if (currentStep >= MAX_STEPS) {
+                if (currentStep >= MAX_STEPS && agentState != AgentState.WAITING_APPROVAL) {
                     agentState = AgentState.FINISHED;
                     log.warn("Max steps reached, stopping agent");
                 }
             }
-            agentState = AgentState.FINISHED;
+
+            if (agentState != AgentState.WAITING_APPROVAL) {
+                agentState = AgentState.FINISHED;
+            }
         } catch (Exception e) {
             agentState = AgentState.ERROR;
             log.error("Error running agent", e);

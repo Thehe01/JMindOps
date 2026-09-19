@@ -76,6 +76,16 @@ public class ChatGenerationCoordinator {
             end
             """;
 
+    private static final String CLAIM_RESUME_LUA_SCRIPT = """
+            local current = redis.call('get', KEYS[1])
+            if not current or current == ARGV[1] or current == ARGV[2] then
+                redis.call('set', KEYS[1], ARGV[2], 'EX', ARGV[3])
+                return 1
+            else
+                return 0
+            end
+            """;
+
     private final StringRedisTemplate redisTemplate;
     // 用于内存降级，以及看门狗追踪当前实例持有的 active generation
     private final ConcurrentMap<String, String> memoryGenerations = new ConcurrentHashMap<>();
@@ -201,6 +211,40 @@ public class ChatGenerationCoordinator {
 
         String current = memoryGenerations.putIfAbsent(sessionId, expectedReserved);
         return current == null || expectedReserved.equals(current);
+    }
+
+    public boolean claimForResume(String sessionId, String generationId) {
+        String expectedReserved = RESERVED + generationId;
+        String newRunning = RUNNING + generationId;
+
+        if (redisTemplate != null) {
+            try {
+                String key = buildKey(sessionId);
+                DefaultRedisScript<Long> script = new DefaultRedisScript<>(CLAIM_RESUME_LUA_SCRIPT, Long.class);
+                Long result = redisTemplate.execute(
+                        script,
+                        Collections.singletonList(key),
+                        expectedReserved,
+                        newRunning,
+                        String.valueOf(DEFAULT_TTL.toSeconds())
+                );
+                if (result != null && result == 1L) {
+                    memoryGenerations.put(sessionId, newRunning);
+                    return true;
+                }
+                return false;
+            } catch (Exception e) {
+                log.error("[ChatGenerationCoordinator] Redis claimForResume error, fail-closed: {}", e.getMessage());
+                throw new BizException(500, "分布式协调服务异常，为保证一致性已拒绝任务恢复");
+            }
+        }
+
+        String current = memoryGenerations.get(sessionId);
+        if (current == null || expectedReserved.equals(current) || newRunning.equals(current)) {
+            memoryGenerations.put(sessionId, newRunning);
+            return true;
+        }
+        return false;
     }
 
     /**

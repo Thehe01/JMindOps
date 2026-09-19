@@ -77,11 +77,35 @@ public class ToolGovernanceService {
         if (!pendingIds.isEmpty()) return ApprovalDecision.waiting(pendingIds.get(0));
 
         String approvalId = UUID.randomUUID().toString();
-        jdbcTemplate.update("""
-                INSERT INTO tool_approval
-                (id, user_id, session_id, tool_name, arguments_json, fingerprint, status, created_at, expires_at)
-                VALUES (CAST(? AS uuid), CAST(? AS uuid), CAST(? AS uuid), ?, CAST(? AS jsonb), ?, 'PENDING', NOW(), NOW() + INTERVAL '10 minutes')
-                """, approvalId, user.id(), sessionId, toolName, redactedArgumentsJson, fingerprint);
+        String generationId = ToolExecutionContext.getGenerationId();
+        String toolCallId = ToolExecutionContext.getToolCallId();
+        if (generationId != null && !generationId.isBlank()) {
+            if (toolCallId != null && !toolCallId.isBlank()) {
+                jdbcTemplate.update("""
+                        INSERT INTO tool_approval
+                        (id, user_id, session_id, tool_name, arguments_json, fingerprint, status, created_at, expires_at, generation_id, tool_call_id)
+                        VALUES (CAST(? AS uuid), CAST(? AS uuid), CAST(? AS uuid), ?, CAST(? AS jsonb), ?, 'PENDING', NOW(), NOW() + INTERVAL '10 minutes', CAST(? AS uuid), ?)
+                        """, approvalId, user.id(), sessionId, toolName, redactedArgumentsJson, fingerprint, generationId, toolCallId);
+            } else {
+                jdbcTemplate.update("""
+                        INSERT INTO tool_approval
+                        (id, user_id, session_id, tool_name, arguments_json, fingerprint, status, created_at, expires_at, generation_id)
+                        VALUES (CAST(? AS uuid), CAST(? AS uuid), CAST(? AS uuid), ?, CAST(? AS jsonb), ?, 'PENDING', NOW(), NOW() + INTERVAL '10 minutes', CAST(? AS uuid))
+                        """, approvalId, user.id(), sessionId, toolName, redactedArgumentsJson, fingerprint, generationId);
+            }
+        } else if (toolCallId != null && !toolCallId.isBlank()) {
+            jdbcTemplate.update("""
+                    INSERT INTO tool_approval
+                    (id, user_id, session_id, tool_name, arguments_json, fingerprint, status, created_at, expires_at, tool_call_id)
+                    VALUES (CAST(? AS uuid), CAST(? AS uuid), CAST(? AS uuid), ?, CAST(? AS jsonb), ?, 'PENDING', NOW(), NOW() + INTERVAL '10 minutes', ?)
+                    """, approvalId, user.id(), sessionId, toolName, redactedArgumentsJson, fingerprint, toolCallId);
+        } else {
+            jdbcTemplate.update("""
+                    INSERT INTO tool_approval
+                    (id, user_id, session_id, tool_name, arguments_json, fingerprint, status, created_at, expires_at)
+                    VALUES (CAST(? AS uuid), CAST(? AS uuid), CAST(? AS uuid), ?, CAST(? AS jsonb), ?, 'PENDING', NOW(), NOW() + INTERVAL '10 minutes')
+                    """, approvalId, user.id(), sessionId, toolName, redactedArgumentsJson, fingerprint);
+        }
         return ApprovalDecision.waiting(approvalId);
     }
 
@@ -128,7 +152,8 @@ public class ToolGovernanceService {
         AuthenticatedUser user = currentUser();
         List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
                 SELECT id::text AS id, session_id::text AS "sessionId", tool_name AS "toolName",
-                       arguments_json::text AS "arguments", status, created_at AS "createdAt", expires_at AS "expiresAt"
+                       arguments_json::text AS "arguments", status, created_at AS "createdAt", expires_at AS "expiresAt",
+                       generation_id::text AS "generationId", tool_call_id AS "toolCallId"
                 FROM tool_approval
                 WHERE user_id = CAST(? AS uuid) AND (? IS NULL OR status = ?)
                 ORDER BY created_at DESC
@@ -146,7 +171,7 @@ public class ToolGovernanceService {
         AuthenticatedUser user = currentUser();
         String validatedApprovalId = validateApprovalId(approvalId);
         List<Map<String, Object>> records = jdbcTemplate.queryForList("""
-                SELECT session_id::text AS "sessionId", tool_name AS "toolName"
+                SELECT session_id::text AS "sessionId", tool_name AS "toolName", generation_id::text AS "generationId"
                 FROM tool_approval
                 WHERE id = CAST(? AS uuid) AND user_id = CAST(? AS uuid)
                   AND status = 'PENDING' AND expires_at > NOW()
@@ -156,6 +181,7 @@ public class ToolGovernanceService {
         }
         String sessionId = (String) records.get(0).get("sessionId");
         String toolName = (String) records.get(0).get("toolName");
+        String generationId = (String) records.get(0).get("generationId");
 
         int updated = jdbcTemplate.update("""
                 UPDATE tool_approval SET status = ?, decided_at = NOW()
@@ -165,7 +191,7 @@ public class ToolGovernanceService {
         if (updated == 0) {
             throw new BizException(409, "Approval does not exist or can no longer be decided");
         }
-        return new ApprovalRecord(validatedApprovalId, sessionId, toolName, approved);
+        return new ApprovalRecord(validatedApprovalId, sessionId, toolName, approved, generationId);
     }
 
     public String maskSensitiveArguments(String argumentsJson) {
@@ -280,6 +306,9 @@ public class ToolGovernanceService {
         static ApprovalDecision waiting(String approvalId) { return new ApprovalDecision(false, approvalId); }
     }
 
-    public record ApprovalRecord(String approvalId, String sessionId, String toolName, boolean approved) {
+    public record ApprovalRecord(String approvalId, String sessionId, String toolName, boolean approved, String generationId) {
+        public ApprovalRecord(String approvalId, String sessionId, String toolName, boolean approved) {
+            this(approvalId, sessionId, toolName, approved, null);
+        }
     }
 }

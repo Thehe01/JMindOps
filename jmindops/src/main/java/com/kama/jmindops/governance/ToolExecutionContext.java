@@ -12,19 +12,44 @@ public final class ToolExecutionContext {
     }
 
     public static void setSessionId(String sessionId) {
-        set(sessionId, Collections.emptySet());
+        set(sessionId, null, Collections.emptySet());
     }
 
     public static void set(String sessionId, Collection<String> allowedKnowledgeBaseIds) {
+        set(sessionId, null, allowedKnowledgeBaseIds);
+    }
+
+    public static void set(String sessionId, String generationId, Collection<String> allowedKnowledgeBaseIds) {
+        set(sessionId, generationId, allowedKnowledgeBaseIds, null);
+    }
+
+    public static void set(String sessionId, String generationId, Collection<String> allowedKnowledgeBaseIds, String toolCallId) {
         Set<String> immutableAllowedIds = allowedKnowledgeBaseIds == null
                 ? Collections.emptySet()
                 : Collections.unmodifiableSet(new HashSet<>(allowedKnowledgeBaseIds));
-        SCOPE.set(new ExecutionScope(sessionId, immutableAllowedIds));
+        SCOPE.set(new ExecutionScope(sessionId, generationId, immutableAllowedIds, toolCallId));
+    }
+
+    public static void setToolCallId(String toolCallId) {
+        ExecutionScope scope = SCOPE.get();
+        if (scope != null) {
+            SCOPE.set(new ExecutionScope(scope.sessionId(), scope.generationId(), scope.allowedKnowledgeBaseIds(), toolCallId));
+        }
     }
 
     public static String getSessionId() {
         ExecutionScope scope = SCOPE.get();
         return scope == null ? null : scope.sessionId();
+    }
+
+    public static String getGenerationId() {
+        ExecutionScope scope = SCOPE.get();
+        return scope == null ? null : scope.generationId();
+    }
+
+    public static String getToolCallId() {
+        ExecutionScope scope = SCOPE.get();
+        return scope == null ? null : scope.toolCallId();
     }
 
     /**
@@ -40,6 +65,11 @@ public final class ToolExecutionContext {
         SCOPE.remove();
     }
 
-    private record ExecutionScope(String sessionId, Set<String> allowedKnowledgeBaseIds) {
+    private record ExecutionScope(
+            String sessionId,
+            String generationId,
+            Set<String> allowedKnowledgeBaseIds,
+            String toolCallId
+    ) {
     }
 }
