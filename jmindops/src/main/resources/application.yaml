@@ -45,12 +45,17 @@ spring:
             enable: true
             required: true
   ai:
+    # 默认不自动注册本地 ChatModel；设置 SPRING_AI_MODEL_CHAT=ollama 后启用。
+    # 云模型仍按各自 API Key 动态注册，none 不会屏蔽它们。
+    model:
+      chat: ${SPRING_AI_MODEL_CHAT:none}
+      embedding: ${SPRING_AI_MODEL_EMBEDDING:none}
     deepseek:
       api-key: ${DEEPSEEK_API_KEY:}
       base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
       chat:
         options:
-          model: deepseek-chat
+          model: ${DEEPSEEK_CHAT_MODEL:deepseek-chat}
     zhipuai:
       api-key: ${ZHIPUAI_API_KEY:}
       base-url: ${ZHIPUAI_BASE_URL:https://open.bigmodel.cn/api/paas}
@@ -63,6 +68,11 @@ spring:
         chat:
           options:
             model: gemini-2.5
+    ollama:
+      base-url: ${OLLAMA_CHAT_BASE_URL:http://localhost:11434}
+      chat:
+        options:
+          model: ${OLLAMA_CHAT_MODEL:qwen2.5}
     mcp:
       client:
         enabled: ${MCP_CLIENT_ENABLED:false}
@@ -85,23 +95,53 @@ document:
     base-path: ${DOCUMENT_STORAGE_BASE_PATH:./data/documents}
 
 rag:
+  retrieval:
+    # 生成链路先扩大候选集，再由 reranker 压缩为最终上下文；低于阈值时返回“证据不足”。
+    answer-top-k: ${RAG_ANSWER_TOP_K:5}
+    candidate-top-k: ${RAG_CANDIDATE_TOP_K:20}
+    evidence-gate-enabled: ${RAG_EVIDENCE_GATE_ENABLED:true}
+    minimum-rerank-score: ${RAG_MINIMUM_RERANK_SCORE:0.05}
   embedding:
     base-url: ${RAG_EMBEDDING_BASE_URL:http://localhost:11434}
     model: ${RAG_EMBEDDING_MODEL:bge-m3}
     request-timeout-seconds: ${RAG_REQUEST_TIMEOUT_SECONDS:30}
+    dimensions: ${RAG_EMBEDDING_DIMENSIONS:1024}
+    normalization: ${RAG_EMBEDDING_NORMALIZATION:none}
+  index:
+    pipeline-version: ${RAG_INDEX_PIPELINE_VERSION:tika-flexmark-chunk-v1}
   reranker:
-    enabled: ${RAG_RERANKER_ENABLED:false}
-    model: ${RAG_RERANKER_MODEL:bge-reranker-large}
+    # none 为默认的未部署状态；http 对接 vLLM/Jina 协议，tei 对接 Hugging Face TEI。
+    provider: ${RAG_RERANKER_PROVIDER:none}
+    base-url: ${RAG_RERANKER_BASE_URL:http://localhost:8001}
+    endpoint: ${RAG_RERANKER_ENDPOINT:/v1/rerank}
+    tei-endpoint: ${RAG_RERANKER_TEI_ENDPOINT:/rerank}
+    model: ${RAG_RERANKER_MODEL:BAAI/bge-reranker-v2-m3}
+    request-timeout-seconds: ${RAG_RERANKER_TIMEOUT_SECONDS:30}
 
 app:
+  agent:
+    llm-stream-timeout-seconds: ${AGENT_LLM_STREAM_TIMEOUT_SECONDS:120}
   security:
     jwt-secret: ${APP_JWT_SECRET:}
     token-ttl-hours: ${APP_JWT_TTL_HOURS:1}
   tools:
     database:
       enabled: ${DATABASE_TOOL_ENABLED:false}
+      jdbc-url: ${DATABASE_TOOL_JDBC_URL:}
+      username: ${DATABASE_TOOL_USERNAME:jmindops_tool_reader}
+      password: ${DATABASE_TOOL_PASSWORD:}
+      allowed-relations: ${DATABASE_TOOL_ALLOWED_RELATIONS:agent,chat_session,chat_message,knowledge_base,document,chunk_bge_m3}
     email:
       enabled: ${EMAIL_TOOL_ENABLED:false}
+    filesystem:
+      enabled: ${FILESYSTEM_TOOL_ENABLED:false}
+      base-path: ${FILESYSTEM_TOOL_BASE_PATH:./data/mcp-workspace}
   bootstrap-admin:
     username: ${APP_BOOTSTRAP_ADMIN_USERNAME:}
     password: ${APP_BOOTSTRAP_ADMIN_PASSWORD:}
+  generation:
+    pending-redispatch-after-seconds: ${GENERATION_PENDING_REDISPATCH_AFTER_SECONDS:15}
+    running-timeout-seconds: ${GENERATION_RUNNING_TIMEOUT_SECONDS:600}
+    recovery-batch-size: ${GENERATION_RECOVERY_BATCH_SIZE:20}
+    recovery-initial-delay-ms: ${GENERATION_RECOVERY_INITIAL_DELAY_MS:15000}
+    recovery-fixed-delay-ms: ${GENERATION_RECOVERY_FIXED_DELAY_MS:15000}

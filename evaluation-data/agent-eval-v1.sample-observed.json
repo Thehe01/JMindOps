@@ -1,0 +1,30 @@
+{
+  "datasetId": "jmindops-agent-eval-v1",
+  "runId": "sample-only",
+  "results": [
+    {
+      "caseId": "chat-001",
+      "route": "CHAT",
+      "terminalStatus": "SUCCEEDED",
+      "steps": [{"stepNo": 1, "status": "COMPLETED", "toolInvocations": []}]
+    },
+    {
+      "caseId": "rag-001",
+      "route": "RAG",
+      "terminalStatus": "SUCCEEDED",
+      "steps": [
+        {"stepNo": 1, "status": "COMPLETED", "toolInvocations": [{"toolName": "KnowledgeTool", "status": "SUCCEEDED"}]},
+        {"stepNo": 2, "status": "COMPLETED", "toolInvocations": []}
+      ]
+    },
+    {
+      "caseId": "approval-write-001",
+      "route": "MCP",
+      "terminalStatus": "SUCCEEDED",
+      "steps": [
+        {"stepNo": 1, "status": "COMPLETED", "toolInvocations": [{"toolName": "writeFile", "status": "WAITING_APPROVAL"}]},
+        {"stepNo": 2, "status": "COMPLETED", "toolInvocations": []}
+      ]
+    }
+  ]
+}

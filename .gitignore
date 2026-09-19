@@ -11,6 +11,8 @@
 **/dist/
 **/target/
 **/data/
+.venv-bfcl*/
+.bfcl-package-cache/
 .idea/
 .vscode/
 .fleet/
@@ -24,10 +26,36 @@ output*.txt
 *.dumpstream
 .DS_Store
 
-# Local interview notes & private docs
+# Local interview notes, resumes & private docs
 interview_qa.md
+jmindops_interview_recitation_master.md
 walkthrough.md
+JMindOps.svg
+全生命周期.md
+output/
+
+# Python cache & test artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Agent & temporary folders
+.agents/
+tmp/
+
+# Real corpora stay local; the synthetic AgentEval contract is safe to version.
+evaluation-data/*
+!evaluation-data/agent-eval-v1.json
+!evaluation-data/agent-eval-v1.sample-observed.json
+!evaluation-data/agent-eval-rag-fixture.md
+!evaluation-data/agent-eval-workspace/
+!evaluation-data/agent-eval-workspace/**
+!evaluation-data/agent-eval-rag-fixture.md
+!evaluation-data/agent-eval-workspace/
+!evaluation-data/agent-eval-workspace/**
+!evaluation-data/bfcl-v4-core-v1.json
+evaluation-results/
 *debug*.txt
 mvn_debug.txt
 out*.txt
-

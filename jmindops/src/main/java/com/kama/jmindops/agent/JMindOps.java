@@ -1,11 +1,15 @@
 package com.kama.jmindops.agent;
 
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.kama.jmindops.event.AgentMessageGeneratedEvent;
 import com.kama.jmindops.governance.ToolExecutionContext;
+import com.kama.jmindops.governance.ToolApprovalSignal;
 import com.kama.jmindops.model.dto.KnowledgeBaseDTO;
+import com.kama.jmindops.service.AgentTraceStore;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.MessageWindowChatMemory;
@@ -17,6 +21,7 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.DefaultToolCallingChatOptions;
+import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.model.tool.ToolCallingManager;
 import org.springframework.ai.model.tool.ToolExecutionResult;
 import org.springframework.ai.tool.ToolCallback;
@@ -28,20 +33,25 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 
 public class JMindOps {
     private static final Logger log = LoggerFactory.getLogger(JMindOps.class);
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final String KNOWLEDGE_TOOL_NAME = "KnowledgeTool";
 
     // 最多循环次数
     private static final Integer MAX_STEPS = 20;
     private static final Integer DEFAULT_MAX_MESSAGES = 20;
-    // 单次模型响应流超时时间
-    private static final Duration LLM_STREAM_TIMEOUT = Duration.ofSeconds(60);
+    private static final Duration DEFAULT_LLM_STREAM_TIMEOUT = Duration.ofSeconds(120);
     // 单次生成最大累计 Token 熔断阈值（防死循环消耗海量 Token）
     private static final long MAX_CUMULATIVE_TOKENS = 64_000L;
     private long cumulativeTokens = 0L;
@@ -60,6 +70,15 @@ public class JMindOps {
     private AgentState agentState;
     // 可用的工具
     private List<ToolCallback> availableTools;
+    // 本轮经路由和安全策略过滤后的完整工具集，供确定性执行计划逐步开放。
+    private List<ToolCallback> runtimeTools;
+    private List<String> requiredToolSequence = List.of();
+    private int nextRequiredToolIndex = 0;
+    private int plannedToolRepairAttempts = 0;
+    private RoutingDecision routingDecision;
+    private String requiredKnowledgeQuery;
+    private boolean requiredKnowledgeRetrievalCompleted;
+    private int retrievedSourceCount;
     // 可访问的知识库
     private List<KnowledgeBaseDTO> availableKbs;
     // 工具调用管理器
@@ -76,6 +95,10 @@ public class JMindOps {
     private ApplicationEventPublisher eventPublisher;
     // 最后一次的 ChatResponse
     private ChatResponse lastChatResponse;
+    // 持久化 Agent 每一步和工具调用的脱敏 Trace
+    private AgentTraceStore agentTraceStore;
+    // 单次模型响应流超时；云端推理的尾延迟可能明显高于本地模型。
+    private Duration llmStreamTimeout = DEFAULT_LLM_STREAM_TIMEOUT;
 
     public JMindOps() {
     }
@@ -93,7 +116,12 @@ public class JMindOps {
                      List<KnowledgeBaseDTO> availableKbs,
                      String chatSessionId,
                      String generationId,
-                     ApplicationEventPublisher eventPublisher
+                     ApplicationEventPublisher eventPublisher,
+                     AgentTraceStore agentTraceStore,
+                     RoutingDecision routingDecision,
+                     String requiredKnowledgeQuery,
+                     AgentExecutionPolicy.Plan executionPlan,
+                     Duration llmStreamTimeout
     ) {
         this.agentId = agentId;
         this.name = name;
@@ -102,12 +130,23 @@ public class JMindOps {
 
         this.chatClient = chatClient;
 
-        this.availableTools = availableTools;
+        this.runtimeTools = availableTools == null ? List.of() : List.copyOf(availableTools);
+        this.availableTools = new ArrayList<>(this.runtimeTools);
         this.availableKbs = availableKbs;
+        this.routingDecision = routingDecision;
+        this.requiredKnowledgeQuery = requiredKnowledgeQuery;
+        this.requiredToolSequence = executionPlan == null
+                ? List.of()
+                : executionPlan.requiredToolSequence();
+        restrictToolsToNextPlannedStep();
 
         this.chatSessionId = chatSessionId;
         this.generationId = generationId;
         this.eventPublisher = eventPublisher;
+        this.agentTraceStore = agentTraceStore;
+        this.llmStreamTimeout = llmStreamTimeout == null
+                ? DEFAULT_LLM_STREAM_TIMEOUT
+                : llmStreamTimeout;
 
         this.agentState = AgentState.IDLE;
 
@@ -132,6 +171,7 @@ public class JMindOps {
             optionsBuilder.topP(topP);
         }
         this.chatOptions = optionsBuilder.build();
+        synchronizeToolCallbacks();
 
         // 工具调用管理器
         this.toolCallingManager = ToolCallingManager.builder().build();
@@ -165,7 +205,18 @@ public class JMindOps {
         }
     }
 
-    private boolean think() {
+    private boolean think(String stepTraceId) {
+        // ChatClient 的请求构建器会合并工具回调；每一步先显式覆盖底层选项，
+        // 确保计划完成后的空工具集不会沿用上一步的回调。
+        synchronizeToolCallbacks();
+        String ragGroundingInstruction = routingDecision == RoutingDecision.RAG
+                ? RagAnswerPolicy.groundingInstruction()
+                : "";
+        String plannedStepInstruction = hasPendingRequiredTool()
+                ? "- 当前执行计划的下一步必须调用且只能调用工具 " + nextRequiredToolName()
+                + "。不得跳过、替换、并行调用或在工具执行前输出最终答案。"
+                + (plannedToolRepairAttempts > 0 ? " 上一次没有按计划调用工具，本次必须纠正。" : "")
+                : "";
         String thinkPrompt = """
                 现在你是一个智能的的具体「决策模块」
                 请根据当前对话上下文，决定下一步的动作。
@@ -174,7 +225,9 @@ public class JMindOps {
                 - 你目前拥有的知识库列表以及描述：%s
                 - 如果有缺失的上下文时，优先从知识库中进行搜索
                 - 使用 KnowledgeTool 的检索结果回答时，必须在相关结论后保留工具结果中的 [Source N] 引用标记；找不到依据时明确说明。
-                """.formatted(this.availableKbs);
+                %s
+                %s
+                """.formatted(this.availableKbs, ragGroundingInstruction, plannedStepInstruction);
 
         Prompt prompt = Prompt.builder()
                 .chatOptions(this.chatOptions)
@@ -191,8 +244,8 @@ public class JMindOps {
                 .chatResponse();
 
         StringBuilder fullContent = new StringBuilder();
-        java.util.Map<String, StringBuilder> toolCallArguments = new java.util.HashMap<>();
-        java.util.Map<String, String> toolCallNames = new java.util.HashMap<>();
+        java.util.Map<String, StringBuilder> toolCallArguments = new LinkedHashMap<>();
+        java.util.Map<String, String> toolCallNames = new LinkedHashMap<>();
         org.springframework.ai.chat.metadata.ChatResponseMetadata[] lastMetadata = new org.springframework.ai.chat.metadata.ChatResponseMetadata[1];
 
         // 设定单次模型推流 60 秒超时限制，彻底杜绝工作线程永久卡死
@@ -204,7 +257,7 @@ public class JMindOps {
                 AssistantMessage output = chunk.getResult().getOutput();
                 if (output.getText() != null && !output.getText().isEmpty()) {
                     fullContent.append(output.getText());
-                    if (eventPublisher != null) {
+                    if (eventPublisher != null && !shouldBufferRagAnswer() && !shouldBufferPlannedAction()) {
                         eventPublisher.publishEvent(new com.kama.jmindops.event.AgentMessageChunkEvent(
                                 this, this.chatSessionId, this.generationId, output.getText()));
                     }
@@ -220,7 +273,7 @@ public class JMindOps {
                     }
                 }
             }
-        }).blockLast(LLM_STREAM_TIMEOUT);
+        }).blockLast(llmStreamTimeout);
 
         List<AssistantMessage.ToolCall> finalToolCalls = new ArrayList<>();
         for (String id : toolCallNames.keySet()) {
@@ -229,7 +282,26 @@ public class JMindOps {
                     id, "function", toolCallNames.get(id), arguments == null ? "" : arguments.toString()));
         }
 
-        AssistantMessage aggregatedMessage = org.springframework.ai.chat.messages.AssistantMessageFactory.create(fullContent.toString(), new java.util.HashMap<>(), finalToolCalls);
+        String finalContent = fullContent.toString();
+        if (finalToolCalls.isEmpty() && shouldBufferPlannedAction()) {
+            if (plannedToolRepairAttempts < 1) {
+                plannedToolRepairAttempts++;
+                log.warn("Agent 未执行必需工具，触发一次受限重试: sessionId={}, generationId={}, tool={}",
+                        this.chatSessionId, this.generationId, nextRequiredToolName());
+                return think(stepTraceId);
+            }
+            throw new IllegalStateException("Agent 在完成必需工具步骤前提前生成了最终答案: "
+                    + nextRequiredToolName());
+        }
+        if (shouldBufferRagAnswer() && finalToolCalls.isEmpty()) {
+            if (hasPendingRequiredTool()) {
+                throw new IllegalStateException("Agent 在完成必需工具步骤前提前生成了最终答案: "
+                        + nextRequiredToolName());
+            }
+            finalContent = RagAnswerPolicy.enforceValidCitations(finalContent, retrievedSourceCount);
+            publishChunk(finalContent);
+        }
+        AssistantMessage aggregatedMessage = org.springframework.ai.chat.messages.AssistantMessageFactory.create(finalContent, new java.util.HashMap<>(), finalToolCalls);
         this.lastChatResponse = new ChatResponse(List.of(new org.springframework.ai.chat.model.Generation(aggregatedMessage)), lastMetadata[0]);
 
         long costTime = System.currentTimeMillis() - startTime;
@@ -238,6 +310,7 @@ public class JMindOps {
 
         org.springframework.ai.chat.metadata.Usage usage = null;
         String modelName = null;
+        boolean tokenBudgetExceeded = false;
         if (this.lastChatResponse.getMetadata() != null) {
             usage = this.lastChatResponse.getMetadata().getUsage();
             modelName = this.lastChatResponse.getMetadata().getModel();
@@ -247,6 +320,7 @@ public class JMindOps {
                     log.warn("累计消耗 Token 超过安全预算上限 ({} > {})，触发安全熔断: sessionId={}",
                             this.cumulativeTokens, MAX_CUMULATIVE_TOKENS, this.chatSessionId);
                     this.agentState = AgentState.FINISHED;
+                    tokenBudgetExceeded = true;
                 }
             }
         }
@@ -255,13 +329,21 @@ public class JMindOps {
         List<AssistantMessage.ToolCall> toolCalls = output.getToolCalls();
 
         saveMessage(output, usage, costTime, modelName);
+        if (this.agentTraceStore != null) {
+            this.agentTraceStore.completeThinking(
+                    this.generationId, stepTraceId, output, usage, costTime, modelName);
+        }
         logToolCalls(toolCalls);
+
+        if (tokenBudgetExceeded) {
+            throw new IllegalStateException("Agent 累计 Token 超过安全预算上限");
+        }
 
         return !toolCalls.isEmpty();
     }
 
     // 执行
-    private void execute() {
+    private void execute(String stepTraceId) {
         Assert.notNull(this.lastChatResponse, "Last chat client response cannot be null");
 
         if (!this.lastChatResponse.hasToolCalls()) {
@@ -281,6 +363,7 @@ public class JMindOps {
                 .collect(Collectors.toUnmodifiableSet());
         ToolExecutionContext.set(this.chatSessionId, allowedKnowledgeBaseIds);
         ToolExecutionResult toolExecutionResult;
+        long startedAt = System.currentTimeMillis();
         try {
             toolExecutionResult = toolCallingManager.executeToolCalls(prompt, this.lastChatResponse);
         } finally {
@@ -304,6 +387,29 @@ public class JMindOps {
 
         // 保存工具调用
         saveMessage(toolResponseMessage, null, null, null);
+        if (this.agentTraceStore != null) {
+            this.agentTraceStore.completeTools(
+                    this.generationId,
+                    stepTraceId,
+                    toolResponseMessage,
+                    System.currentTimeMillis() - startedAt
+            );
+        }
+
+        boolean waitingForApproval = toolResponseMessage.getResponses().stream()
+                .anyMatch(response -> ToolApprovalSignal.isWaitingResponse(response.responseData()));
+        if (waitingForApproval) {
+            this.availableTools = Collections.emptyList();
+            this.nextRequiredToolIndex = this.requiredToolSequence.size();
+            AssistantMessage waitingMessage = new AssistantMessage(ToolApprovalSignal.userFacingWaitingMessage());
+            publishChunk(waitingMessage.getText());
+            saveMessage(waitingMessage, null, 0L, "deterministic-approval-orchestrator");
+            this.agentState = AgentState.FINISHED;
+            log.info("工具进入待审批状态，本轮撤销后续工具: sessionId={}, generationId={}",
+                    this.chatSessionId, this.generationId);
+        } else {
+            advanceExecutionPlan(toolResponseMessage);
+        }
 
         if (toolResponseMessage.getResponses()
                 .stream()
@@ -314,12 +420,223 @@ public class JMindOps {
     }
 
     // 单个步骤模板
-    private void step() {
-        if (think()) {
-            execute();
-        } else { // 没有工具调用
-            agentState = AgentState.FINISHED;
+    private void step(int stepNo) {
+        String stepTraceId = this.agentTraceStore == null
+                ? null
+                : this.agentTraceStore.startStep(this.generationId, stepNo);
+        boolean toolExecutionStarted = false;
+        try {
+            if (think(stepTraceId)) {
+                if (this.agentTraceStore != null) {
+                    this.agentTraceStore.markToolsRunning(this.generationId, stepTraceId);
+                }
+                toolExecutionStarted = true;
+                execute(stepTraceId);
+            } else { // 没有工具调用
+                agentState = AgentState.FINISHED;
+            }
+        } catch (RuntimeException exception) {
+            if (this.agentTraceStore != null) {
+                try {
+                    this.agentTraceStore.failStep(
+                            this.generationId,
+                            stepTraceId,
+                            exception.getMessage(),
+                            toolExecutionStarted
+                    );
+                } catch (RuntimeException traceException) {
+                    exception.addSuppressed(traceException);
+                    log.error("Failed to persist Agent step failure: generationId={}, stepNo={}",
+                            this.generationId, stepNo, traceException);
+                }
+            }
+            throw exception;
         }
+    }
+
+    private void advanceExecutionPlan(ToolResponseMessage responseMessage) {
+        if (!hasPendingRequiredTool()) {
+            return;
+        }
+        String expected = nextRequiredToolName();
+        boolean completed = responseMessage.getResponses().stream()
+                .anyMatch(response -> expected.equals(response.name()));
+        if (completed) {
+            nextRequiredToolIndex++;
+            plannedToolRepairAttempts = 0;
+            restrictToolsToNextPlannedStep();
+        }
+    }
+
+    private void restrictToolsToNextPlannedStep() {
+        if (requiredToolSequence == null || requiredToolSequence.isEmpty()) {
+            return;
+        }
+        if (!hasPendingRequiredTool()) {
+            this.availableTools = Collections.emptyList();
+            synchronizeToolCallbacks();
+            return;
+        }
+        String nextTool = nextRequiredToolName();
+        this.availableTools = this.runtimeTools.stream()
+                .filter(callback -> nextTool.equals(callback.getToolDefinition().name()))
+                .toList();
+        synchronizeToolCallbacks();
+    }
+
+    private void synchronizeToolCallbacks() {
+        if (this.chatOptions instanceof ToolCallingChatOptions toolCallingOptions) {
+            toolCallingOptions.setToolCallbacks(List.copyOf(this.availableTools));
+        }
+    }
+
+    private boolean hasPendingRequiredTool() {
+        return nextRequiredToolIndex < requiredToolSequence.size();
+    }
+
+    private String nextRequiredToolName() {
+        return hasPendingRequiredTool() ? requiredToolSequence.get(nextRequiredToolIndex) : null;
+    }
+
+    private boolean shouldBufferRagAnswer() {
+        return routingDecision == RoutingDecision.RAG && requiredKnowledgeRetrievalCompleted;
+    }
+
+    private boolean shouldBufferPlannedAction() {
+        return hasPendingRequiredTool();
+    }
+
+    private void publishChunk(String content) {
+        if (eventPublisher != null && StringUtils.hasText(content)) {
+            eventPublisher.publishEvent(new com.kama.jmindops.event.AgentMessageChunkEvent(
+                    this, this.chatSessionId, this.generationId, content));
+        }
+    }
+
+    private boolean shouldPrefetchKnowledge() {
+        return KNOWLEDGE_TOOL_NAME.equals(nextRequiredToolName());
+    }
+
+    private boolean canPrefetchKnowledge() {
+        return this.availableKbs != null
+                && !this.availableKbs.isEmpty()
+                && this.runtimeTools.stream().anyMatch(callback ->
+                KNOWLEDGE_TOOL_NAME.equals(callback.getToolDefinition().name()));
+    }
+
+    private void executeRequiredKnowledgeRetrieval(int stepNo) {
+        String stepTraceId = this.agentTraceStore == null
+                ? null
+                : this.agentTraceStore.startStep(this.generationId, stepNo);
+        boolean toolExecutionStarted = false;
+        try {
+            ToolCallback knowledgeCallback = this.runtimeTools.stream()
+                    .filter(callback -> KNOWLEDGE_TOOL_NAME.equals(callback.getToolDefinition().name()))
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalStateException("RAG 路由未配置可用的 KnowledgeTool"));
+            KnowledgeBaseDTO knowledgeBase = selectKnowledgeBase(requiredKnowledgeQuery);
+            String toolCallId = UUID.randomUUID().toString();
+            String arguments = knowledgeArguments(knowledgeBase.getId(), requiredKnowledgeQuery);
+            AssistantMessage.ToolCall toolCall = new AssistantMessage.ToolCall(
+                    toolCallId, "function", KNOWLEDGE_TOOL_NAME, arguments);
+            AssistantMessage toolCallMessage = org.springframework.ai.chat.messages.AssistantMessageFactory.create(
+                    "", new java.util.HashMap<>(), List.of(toolCall));
+
+            this.chatMemory.add(this.chatSessionId, toolCallMessage);
+            saveMessage(toolCallMessage, null, 0L, "deterministic-rag-orchestrator");
+            if (this.agentTraceStore != null) {
+                this.agentTraceStore.completeThinking(
+                        this.generationId, stepTraceId, toolCallMessage, null, 0L,
+                        "deterministic-rag-orchestrator");
+                this.agentTraceStore.markToolsRunning(this.generationId, stepTraceId);
+            }
+
+            long startedAt = System.currentTimeMillis();
+            toolExecutionStarted = true;
+            Set<String> allowedKnowledgeBaseIds = this.availableKbs.stream()
+                    .map(KnowledgeBaseDTO::getId)
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toUnmodifiableSet());
+            String responseData;
+            ToolExecutionContext.set(this.chatSessionId, allowedKnowledgeBaseIds);
+            try {
+                responseData = knowledgeCallback.call(arguments);
+            } finally {
+                ToolExecutionContext.clear();
+            }
+            responseData = responseData == null ? "" : responseData;
+            ToolResponseMessage responseMessage = ToolResponseMessage.builder()
+                    .responses(List.of(new ToolResponseMessage.ToolResponse(
+                            toolCallId, KNOWLEDGE_TOOL_NAME, responseData)))
+                    .build();
+            this.chatMemory.add(this.chatSessionId, responseMessage);
+            saveMessage(responseMessage, null, null, null);
+            if (this.agentTraceStore != null) {
+                this.agentTraceStore.completeTools(
+                        this.generationId, stepTraceId, responseMessage,
+                        System.currentTimeMillis() - startedAt);
+            }
+            this.retrievedSourceCount = RagAnswerPolicy.countSources(responseData);
+            this.requiredKnowledgeRetrievalCompleted = true;
+            this.nextRequiredToolIndex++;
+            restrictToolsToNextPlannedStep();
+            log.info("RAG 强制检索完成: sessionId={}, generationId={}, knowledgeBaseId={}, sourceCount={}",
+                    this.chatSessionId, this.generationId, knowledgeBase.getId(), retrievedSourceCount);
+        } catch (RuntimeException exception) {
+            if (this.agentTraceStore != null) {
+                this.agentTraceStore.failStep(
+                        this.generationId, stepTraceId, exception.getMessage(), toolExecutionStarted);
+            }
+            throw exception;
+        }
+    }
+
+    private KnowledgeBaseDTO selectKnowledgeBase(String query) {
+        if (this.availableKbs == null || this.availableKbs.isEmpty()) {
+            throw new IllegalStateException("RAG 路由没有已授权知识库");
+        }
+        String normalizedQuery = query == null ? "" : query.toLowerCase(Locale.ROOT);
+        return this.availableKbs.stream()
+                .max(java.util.Comparator.comparingInt(kb -> knowledgeBaseMatchScore(kb, normalizedQuery)))
+                .orElseThrow();
+    }
+
+    private int knowledgeBaseMatchScore(KnowledgeBaseDTO knowledgeBase, String normalizedQuery) {
+        int score = 0;
+        if (StringUtils.hasText(knowledgeBase.getName())
+                && normalizedQuery.contains(knowledgeBase.getName().toLowerCase(Locale.ROOT))) {
+            score += 2;
+        }
+        if (StringUtils.hasText(knowledgeBase.getDescription())
+                && normalizedQuery.contains(knowledgeBase.getDescription().toLowerCase(Locale.ROOT))) {
+            score++;
+        }
+        return score;
+    }
+
+    private String knowledgeArguments(String knowledgeBaseId, String query) {
+        try {
+            return OBJECT_MAPPER.writeValueAsString(Map.of(
+                    "kbsId", knowledgeBaseId,
+                    "query", query == null ? "" : query));
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("无法构造知识库检索参数", exception);
+        }
+    }
+
+    private void finishWithoutEvidence(int stepNo) {
+        String stepTraceId = this.agentTraceStore == null
+                ? null
+                : this.agentTraceStore.startStep(this.generationId, stepNo);
+        AssistantMessage response = new AssistantMessage(RagAnswerPolicy.INSUFFICIENT_EVIDENCE_MESSAGE);
+        publishChunk(response.getText());
+        saveMessage(response, null, 0L, "deterministic-rag-orchestrator");
+        if (this.agentTraceStore != null) {
+            this.agentTraceStore.completeThinking(
+                    this.generationId, stepTraceId, response, null, 0L,
+                    "deterministic-rag-orchestrator");
+        }
+        this.agentState = AgentState.FINISHED;
     }
 
     // 运行
@@ -329,10 +646,22 @@ public class JMindOps {
         }
 
         try {
-            for (int i = 0; i < MAX_STEPS && agentState != AgentState.FINISHED; i++) {
-                // 当前步骤，用于实现 Agent Loop
-                int currentStep = i + 1;
-                step();
+            int nextStep = 1;
+            if (shouldPrefetchKnowledge()) {
+                if (!canPrefetchKnowledge()) {
+                    finishWithoutEvidence(nextStep);
+                    return;
+                }
+                executeRequiredKnowledgeRetrieval(nextStep++);
+                if (retrievedSourceCount == 0) {
+                    finishWithoutEvidence(nextStep);
+                    return;
+                }
+            }
+            for (int currentStep = nextStep;
+                 currentStep <= MAX_STEPS && agentState != AgentState.FINISHED;
+                 currentStep++) {
+                step(currentStep);
                 if (currentStep >= MAX_STEPS) {
                     agentState = AgentState.FINISHED;
                     log.warn("Max steps reached, stopping agent");

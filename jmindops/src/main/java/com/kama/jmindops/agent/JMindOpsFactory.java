@@ -7,6 +7,8 @@ import com.kama.jmindops.converter.AgentConverter;
 import com.kama.jmindops.converter.ChatMessageConverter;
 import com.kama.jmindops.converter.KnowledgeBaseConverter;
 import com.kama.jmindops.mapper.KnowledgeBaseMapper;
+import com.kama.jmindops.governance.ToolGovernanceCallback;
+import com.kama.jmindops.governance.ToolGovernanceService;
 import com.kama.jmindops.model.dto.AgentDTO;
 import com.kama.jmindops.model.dto.ChatMessageDTO;
 import com.kama.jmindops.model.dto.KnowledgeBaseDTO;
@@ -17,6 +19,7 @@ import com.kama.jmindops.exception.BizException;
 import com.kama.jmindops.security.ResourceAccessService;
 import com.kama.jmindops.service.ChatMessageFacadeService;
 import com.kama.jmindops.service.SseService;
+import com.kama.jmindops.service.AgentTraceStore;
 import com.kama.jmindops.service.ToolFacadeService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,10 +28,12 @@ import org.springframework.ai.chat.messages.*;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
 import java.util.*;
+import java.time.Duration;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -36,6 +41,8 @@ import java.util.stream.Collectors;
 public class JMindOpsFactory {
 
     private static final Logger log = LoggerFactory.getLogger(JMindOpsFactory.class);
+    private static final String KNOWLEDGE_TOOL_NAME = "KnowledgeTool";
+    private static final String TERMINATE_TOOL_NAME = "terminate";
     private final ChatClientRegistry chatClientRegistry;
     private final SseService sseService;
     private final AgentConverter agentConverter;
@@ -46,7 +53,10 @@ public class JMindOpsFactory {
     private final ChatMessageConverter chatMessageConverter;
     private final ApplicationEventPublisher eventPublisher;
     private final ResourceAccessService resourceAccessService;
-    private final List<org.springframework.ai.tool.ToolCallbackProvider> mcpToolProviders;
+    private final AgentTraceStore agentTraceStore;
+    private final ToolGovernanceService toolGovernanceService;
+    private final ExternalToolRegistry externalToolRegistry;
+    private final Duration llmStreamTimeout;
 
     public JMindOpsFactory(
             ChatClientRegistry chatClientRegistry,
@@ -59,7 +69,10 @@ public class JMindOpsFactory {
             ChatMessageConverter chatMessageConverter,
             ApplicationEventPublisher eventPublisher,
             ResourceAccessService resourceAccessService,
-            org.springframework.beans.factory.ObjectProvider<org.springframework.ai.tool.ToolCallbackProvider> toolCallbackProviders
+            AgentTraceStore agentTraceStore,
+            ToolGovernanceService toolGovernanceService,
+            ExternalToolRegistry externalToolRegistry,
+            @Value("${app.agent.llm-stream-timeout-seconds:120}") long llmStreamTimeoutSeconds
     ) {
         this.chatClientRegistry = chatClientRegistry;
         this.sseService = sseService;
@@ -71,7 +84,13 @@ public class JMindOpsFactory {
         this.chatMessageConverter = chatMessageConverter;
         this.eventPublisher = eventPublisher;
         this.resourceAccessService = resourceAccessService;
-        this.mcpToolProviders = toolCallbackProviders.stream().collect(Collectors.toList());
+        this.agentTraceStore = agentTraceStore;
+        this.toolGovernanceService = toolGovernanceService;
+        this.externalToolRegistry = externalToolRegistry;
+        if (llmStreamTimeoutSeconds < 1 || llmStreamTimeoutSeconds > 1800) {
+            throw new IllegalArgumentException("app.agent.llm-stream-timeout-seconds 必须在 1 到 1800 之间");
+        }
+        this.llmStreamTimeout = Duration.ofSeconds(llmStreamTimeoutSeconds);
     }
 
     /**
@@ -150,9 +169,18 @@ public class JMindOpsFactory {
         return kbDTOs;
     }
 
-    private List<Tool> resolveRuntimeTools(AgentDTO agentConfig) {
-        // 固定工具（系统强制）
-        List<Tool> runtimeTools = new ArrayList<>(toolFacadeService.getFixedTools());
+    List<Tool> resolveRuntimeTools(AgentDTO agentConfig, RoutingDecision decision) {
+        boolean hasAuthorizedKnowledgeBase = agentConfig.getAllowedKbs() != null
+                && !agentConfig.getAllowedKbs().isEmpty();
+        boolean exposeKnowledgeTool = decision == RoutingDecision.RAG && hasAuthorizedKnowledgeBase;
+
+        // KnowledgeTool 虽是系统内置工具，也只能在 RAG 且存在授权知识库时暴露。
+        List<Tool> runtimeTools = toolFacadeService.getFixedTools().stream()
+                // Agent 已以“无工具调用”作为正常终止条件；暴露 terminate 只会增加空转步骤，
+                // 并可能让拒绝危险操作的回答在输出前提前结束。
+                .filter(tool -> !TERMINATE_TOOL_NAME.equals(tool.getName()))
+                .filter(tool -> !KNOWLEDGE_TOOL_NAME.equals(tool.getName()) || exposeKnowledgeTool)
+                .collect(Collectors.toCollection(ArrayList::new));
 
         // 可选工具（按 Agent 配置）
         List<String> allowedToolNames = agentConfig.getAllowedTools();
@@ -176,7 +204,8 @@ public class JMindOpsFactory {
     private List<ToolCallback> buildToolCallbacks(
             List<Tool> runtimeTools,
             RoutingDecision decision,
-            Set<String> explicitlyAllowedToolNames
+            Set<String> explicitlyAllowedToolNames,
+            ToolAccessPolicy.Decision accessDecision
     ) {
         List<ToolCallback> callbacks = new ArrayList<>();
         // 1. 添加 Java 内部工具
@@ -186,17 +215,27 @@ public class JMindOpsFactory {
                     .toolObjects(target)
                     .build()
                     .getToolCallbacks();
-            callbacks.addAll(Arrays.asList(toolCallbacks));
+            callbacks.addAll(Arrays.stream(toolCallbacks)
+                    .map(callback -> ToolGovernanceCallback.wrapIfRequired(
+                            target, callback, toolGovernanceService))
+                    .filter(callback -> accessDecision.allowsCallback(
+                            callback.getToolDefinition().name()))
+                    .toList());
         }
 
         // 2. 如果决策需要外部工具交互，则挂载 MCP 外部工具
-        if (decision == RoutingDecision.MCP && mcpToolProviders != null) {
-            for (org.springframework.ai.tool.ToolCallbackProvider provider : mcpToolProviders) {
+        if (decision == RoutingDecision.MCP && externalToolRegistry != null) {
+            for (org.springframework.ai.tool.ToolCallbackProvider provider : externalToolRegistry.providers()) {
                 ToolCallback[] mcpCallbacks = provider.getToolCallbacks();
                 if (mcpCallbacks != null) {
                     List<ToolCallback> allowedCallbacks = Arrays.stream(mcpCallbacks)
+                            .filter(callback -> !accessDecision.blockAllExternalCallbacks())
                             .filter(callback -> explicitlyAllowedToolNames.contains(
                                     callback.getToolDefinition().name()))
+                            .filter(callback -> accessDecision.allowsCallback(
+                                    callback.getToolDefinition().name()))
+                            .map(callback -> ToolGovernanceCallback.wrapExternal(
+                                    callback, toolGovernanceService))
                             .toList();
                     callbacks.addAll(allowedCallbacks);
                     log.info("[Multi-Agent MCP] provider={}, discovered={}, authorized={}",
@@ -219,7 +258,10 @@ public class JMindOpsFactory {
             List<KnowledgeBaseDTO> knowledgeBases,
             List<ToolCallback> toolCallbacks,
             String chatSessionId,
-            String generationId
+            String generationId,
+            RoutingDecision decision,
+            String userMessage,
+            AgentExecutionPolicy.Plan executionPlan
     ) {
         ChatClient chatClient = chatClientRegistry.get(agent.getModel());
         if (Objects.isNull(chatClient)) {
@@ -239,11 +281,16 @@ public class JMindOpsFactory {
                 knowledgeBases,
                 chatSessionId,
                 generationId,
-                eventPublisher
+                eventPublisher,
+                agentTraceStore,
+                decision,
+                userMessage,
+                executionPlan,
+                llmStreamTimeout
         );
     }
 
-    private void applyRoutingDecision(Agent agent, AgentDTO agentConfig, RoutingDecision decision) {
+    void applyRoutingDecision(Agent agent, AgentDTO agentConfig, RoutingDecision decision) {
         if (decision == null) return;
 
         log.info("[Multi-Agent Router] Applying decision: {} to Agent: {}", decision.name(), agent.getName());
@@ -273,8 +320,7 @@ public class JMindOpsFactory {
                 agentConfig.setAllowedTools(tools.stream().filter(t -> t.toLowerCase().contains("document")).collect(Collectors.toList()));
             }
         } else if (decision == RoutingDecision.MCP) {
-            // MCP 模式，主要依赖 MCP 外部工具，可以清空普通 Java 工具和本地知识库
-            agentConfig.setAllowedTools(Collections.emptyList());
+            // MCP 同时支持显式授权的 Java 工具与外部 MCP 工具，但不携带知识库。
             agentConfig.setAllowedKbs(Collections.emptyList());
         }
     }
@@ -287,6 +333,16 @@ public class JMindOpsFactory {
     }
 
     public JMindOps create(String agentId, String chatSessionId, RoutingDecision decision, String generationId) {
+        return create(agentId, chatSessionId, decision, generationId, null);
+    }
+
+    public JMindOps create(
+            String agentId,
+            String chatSessionId,
+            RoutingDecision decision,
+            String generationId,
+            String userMessage
+    ) {
         Agent agent = resourceAccessService.requireOwnedAgent(agentId);
         ChatSession chatSession = resourceAccessService.requireOwnedChatSession(chatSessionId);
         if (!Objects.equals(chatSession.getAgentId(), agentId)) {
@@ -303,16 +359,48 @@ public class JMindOpsFactory {
 
         // 【新增】应用路由决策，动态调整 Agent 配置
         applyRoutingDecision(agent, agentConfig, decision);
+        ToolAccessPolicy.Decision accessDecision = ToolAccessPolicy.evaluate(decision, userMessage);
+        AgentExecutionPolicy.Plan executionPlan = AgentExecutionPolicy.plan(decision, userMessage);
+        if (accessDecision.blocked() && !accessDecision.allowReadOnlyFileSystem()) {
+            // 安全策略已撤销工具时，不再保留一个永远无法完成的强制工具计划。
+            executionPlan = AgentExecutionPolicy.Plan.none();
+        }
+        String executionInstruction = AgentExecutionPolicy.instruction(decision, userMessage);
+        if (StringUtils.hasText(executionInstruction)) {
+            agent.setSystemPrompt(agent.getSystemPrompt()
+                    + "\n\n【本轮执行计划约束】\n"
+                    + executionInstruction);
+            log.info("[Agent Execution Policy] Applied deterministic planning guidance: route={}", decision);
+        }
+        if (accessDecision.allowReadOnlyFileSystem()
+                && explicitlyAllowedToolNames.contains("fileSystemTool")) {
+            List<String> routedTools = new ArrayList<>(Optional.ofNullable(agentConfig.getAllowedTools())
+                    .orElseGet(Collections::emptyList));
+            if (!routedTools.contains("fileSystemTool")) {
+                routedTools.add("fileSystemTool");
+            }
+            agentConfig.setAllowedTools(routedTools);
+        }
+        if (accessDecision.blocked()) {
+            agent.setSystemPrompt(agent.getSystemPrompt()
+                    + "\n\n【本轮安全策略】\n"
+                    + accessDecision.instruction()
+                    + "不得尝试改用其他工具绕过限制，也不得声称操作已经执行。请明确拒绝危险部分并给出安全替代建议。");
+            log.warn("[Agent Tool Policy] External tools withheld for current request: route={}, blockedBeans={}, blockedCallbacks={}",
+                    decision, accessDecision.blockedToolBeans(), accessDecision.blockedCallbacks());
+        }
 
         List<Message> memory = loadMemory(chatSessionId, agentConfig);
 
         // 解析 agent 的支持的知识库
         List<KnowledgeBaseDTO> knowledgeBases = resolveRuntimeKnowledgeBases(agentConfig);
         // 解析 agent 支持的工具调用
-        List<Tool> runtimeTools = resolveRuntimeTools(agentConfig);
+        List<Tool> runtimeTools = resolveRuntimeTools(agentConfig, decision).stream()
+                .filter(tool -> accessDecision.allowsToolBean(tool.getName()))
+                .toList();
         // 将工具调用转换成 ToolCallback 的形式
         List<ToolCallback> toolCallbacks = buildToolCallbacks(
-                runtimeTools, decision, explicitlyAllowedToolNames);
+                runtimeTools, decision, explicitlyAllowedToolNames, accessDecision);
 
         return buildAgentRuntime(
                 agent,
@@ -321,7 +409,10 @@ public class JMindOpsFactory {
                 knowledgeBases,
                 toolCallbacks,
                 chatSessionId,
-                generationId
+                generationId,
+                decision,
+                userMessage,
+                executionPlan
         );
     }
 

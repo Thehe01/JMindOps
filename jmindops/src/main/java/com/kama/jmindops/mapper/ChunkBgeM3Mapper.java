@@ -20,17 +20,23 @@ public interface ChunkBgeM3Mapper {
 
     int deleteById(String id);
 
+    int deleteByDocumentId(@Param("documentId") String documentId);
+
+    List<ChunkBgeM3> selectByDocumentId(@Param("documentId") String documentId);
+
     int updateById(ChunkBgeM3 chunkBgeM3);
 
     List<ChunkBgeM3> similaritySearch(
             @Param("kbId") String kbId,
             @Param("vectorLiteral") String vectorLiteral,
+            @Param("indexFingerprint") String indexFingerprint,
             @Param("limit") int limit
     );
 
-    List<ChunkBgeM3> keywordSearch(
+    List<ChunkBgeM3> bm25Search(
             @Param("kbId") String kbId,
-            @Param("keyword") String keyword,
+            @Param("query") String query,
+            @Param("indexFingerprint") String indexFingerprint,
             @Param("limit") int limit
     );
 }

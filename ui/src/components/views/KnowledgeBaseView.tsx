@@ -11,6 +11,7 @@ import {
   message,
   Empty,
   Alert,
+  Tag,
 } from "antd";
 import {
   BookOutlined,
@@ -81,8 +82,20 @@ const KnowledgeBaseView: React.FC = () => {
     uploadControllerRef.current = controller;
 
     try {
-      await uploadDocument(knowledgeBaseId, file as File, controller.signal);
-      message.success("文档上传成功");
+      const result = await uploadDocument(
+        knowledgeBaseId,
+        file as File,
+        controller.signal,
+      );
+      if (result.indexAction === "UNCHANGED") {
+        message.info("内容未变化，已复用现有索引");
+      } else if (result.indexAction === "UPDATED") {
+        message.success(
+          `增量索引完成：复用 ${result.reusedChunkCount} 个切片，新向量化 ${result.embeddedChunkCount} 个切片`,
+        );
+      } else {
+        message.success(`文档索引完成：${result.chunkCount} 个切片`);
+      }
       await refreshDocuments();
       onSuccess?.(file);
     } catch (error) {
@@ -131,6 +144,21 @@ const KnowledgeBaseView: React.FC = () => {
       key: "size",
       width: 120,
       render: (size: number) => formatFileSize(size),
+    },
+    {
+      title: "索引",
+      key: "index",
+      width: 150,
+      render: (_: unknown, record: DocumentVO) => (
+        <Space size={4}>
+          <Tag color={record.indexStatus === "READY" ? "green" : "default"}>
+            {record.indexStatus === "READY" ? "READY" : "EMPTY"}
+          </Tag>
+          <Text type="secondary">
+            v{record.indexVersion} / {record.chunkCount} chunks
+          </Text>
+        </Space>
+      ),
     },
     {
       title: "操作",

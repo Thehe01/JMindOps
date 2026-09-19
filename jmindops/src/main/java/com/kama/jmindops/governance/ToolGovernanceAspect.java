@@ -5,7 +5,11 @@ import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
 import org.aspectj.lang.reflect.MethodSignature;
 import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.aop.support.AopUtils;
+import org.springframework.core.annotation.AnnotatedElementUtils;
 import org.springframework.stereotype.Component;
+
+import java.lang.reflect.Method;
 
 @Aspect
 @Component
@@ -16,10 +20,17 @@ public class ToolGovernanceAspect {
     }
 
 
-    @Around("@annotation(toolAnnotation)")
-    public Object govern(ProceedingJoinPoint joinPoint, Tool toolAnnotation) throws Throwable {
+    @Around("execution(public * com.kama.jmindops.agent.tools..*(..))")
+    public Object govern(ProceedingJoinPoint joinPoint) throws Throwable {
+        if (ToolGovernanceInvocationContext.isCallbackGoverned()) {
+            return joinPoint.proceed();
+        }
         MethodSignature signature = (MethodSignature) joinPoint.getSignature();
-        RequiresToolApproval approval = signature.getMethod().getAnnotation(RequiresToolApproval.class);
+        Tool toolAnnotation = resolveToolAnnotation(signature, joinPoint.getTarget());
+        if (toolAnnotation == null) {
+            return joinPoint.proceed();
+        }
+        RequiresToolApproval approval = resolveApprovalAnnotation(signature, joinPoint.getTarget());
         String toolName = toolAnnotation.name().isBlank() ? signature.getMethod().getName() : toolAnnotation.name();
         String riskLevel = approval == null ? "LOW" : approval.riskLevel();
         long startedAt = System.currentTimeMillis();
@@ -27,7 +38,7 @@ public class ToolGovernanceAspect {
         if (approval != null) {
             ToolGovernanceService.ApprovalDecision decision = toolGovernanceService.requireApproval(toolName, joinPoint.getArgs(), riskLevel);
             if (!decision.approved()) {
-                String response = "操作需要人工审批，审批编号：" + decision.approvalId() + "。请在界面批准后让用户确认继续。";
+                String response = ToolApprovalSignal.waitingMessage(decision.approvalId());
                 toolGovernanceService.audit(toolName, riskLevel, "PENDING_APPROVAL", joinPoint.getArgs(), response, System.currentTimeMillis() - startedAt);
                 return response;
             }
@@ -41,5 +52,20 @@ public class ToolGovernanceAspect {
             toolGovernanceService.audit(toolName, riskLevel, "FAILED", joinPoint.getArgs(), throwable.getMessage(), System.currentTimeMillis() - startedAt);
             throw throwable;
         }
+    }
+
+    RequiresToolApproval resolveApprovalAnnotation(MethodSignature signature, Object target) {
+        Method targetMethod = resolveTargetMethod(signature, target);
+        return AnnotatedElementUtils.findMergedAnnotation(targetMethod, RequiresToolApproval.class);
+    }
+
+    Tool resolveToolAnnotation(MethodSignature signature, Object target) {
+        Method targetMethod = resolveTargetMethod(signature, target);
+        return AnnotatedElementUtils.findMergedAnnotation(targetMethod, Tool.class);
+    }
+
+    private Method resolveTargetMethod(MethodSignature signature, Object target) {
+        Class<?> targetClass = AopUtils.getTargetClass(target);
+        return AopUtils.getMostSpecificMethod(signature.getMethod(), targetClass);
     }
 }

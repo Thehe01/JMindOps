@@ -7,7 +7,7 @@ import {
   fetchWithAuth,
   handleResponse,
 } from "./http.ts";
-import type { ChatMessageVO, MessageType } from "../types";
+import type { ChatMessageVO } from "../types";
 
 // 类型定义
 export interface ChatOptions {
@@ -16,7 +16,11 @@ export interface ChatOptions {
   messageLength?: number;
 }
 
-export type ModelType = "deepseek-chat" | "glm-4.6" | "gemini-2.5";
+export type ModelType =
+  | "deepseek-chat"
+  | "glm-4.6"
+  | "gemini-2.5"
+  | "ollama-qwen2.5";
 
 export interface CreateAgentRequest {
   name: string;
@@ -203,16 +207,101 @@ export interface GetChatMessagesResponse {
 }
 
 export interface CreateChatMessageRequest {
+  requestId: string;
   agentId: string;
   sessionId: string;
-  role: MessageType;
   content: string;
-  metadata?: MetaData;
 }
 
 export interface CreateChatMessageResponse {
   chatMessageId: string;
   generationId?: string;
+  requestId: string;
+  status: GenerationTaskStatus;
+  idempotentReplay: boolean;
+}
+
+export type GenerationTaskStatus =
+  | "PENDING"
+  | "RUNNING"
+  | "SUCCEEDED"
+  | "FAILED";
+
+export interface GenerationTaskResponse {
+  generationId: string;
+  parentGenerationId?: string;
+  requestId: string;
+  agentId: string;
+  sessionId: string;
+  userMessageId?: string;
+  status: GenerationTaskStatus;
+  attemptCount: number;
+  retryable: boolean;
+  lastError?: string;
+  lastDispatchedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type AgentStepStatus =
+  | "THINKING"
+  | "EXECUTING_TOOLS"
+  | "COMPLETED"
+  | "FAILED"
+  | "UNKNOWN";
+
+export type ToolInvocationStatus =
+  | "PREPARED"
+  | "RUNNING"
+  | "SUCCEEDED"
+  | "WAITING_APPROVAL"
+  | "FAILED"
+  | "UNKNOWN";
+
+export interface AgentToolInvocationTrace {
+  invocationId: string;
+  toolCallId: string;
+  invocationOrder: number;
+  toolName: string;
+  argumentsLength: number;
+  argumentsHash: string;
+  status: ToolInvocationStatus;
+  resultLength?: number;
+  resultHash?: string;
+  latencyMs?: number;
+  lastError?: string;
+  startedAt?: string;
+  completedAt?: string;
+}
+
+export interface AgentStepTrace {
+  stepId: string;
+  stepNo: number;
+  status: AgentStepStatus;
+  modelName?: string;
+  hasToolCalls: boolean;
+  toolCallCount: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  modelLatencyMs?: number;
+  outputLength: number;
+  outputHash?: string;
+  lastError?: string;
+  startedAt: string;
+  completedAt?: string;
+  toolInvocations: AgentToolInvocationTrace[];
+}
+
+export interface AgentTraceResponse {
+  generationId: string;
+  routingDecision?: string;
+  currentStep: number;
+  cumulativeTokens: number;
+  checkpointVersion: number;
+  steps: AgentStepTrace[];
 }
 
 export interface UpdateChatMessageRequest {
@@ -243,6 +332,28 @@ export async function createChatMessage(
   request: CreateChatMessageRequest,
 ): Promise<CreateChatMessageResponse> {
   return post<CreateChatMessageResponse>("/chat-messages", request);
+}
+
+export async function getGenerationTask(
+  generationId: string,
+): Promise<GenerationTaskResponse> {
+  return get<GenerationTaskResponse>(`/generation-tasks/${generationId}`);
+}
+
+export async function getAgentTrace(
+  generationId: string,
+): Promise<AgentTraceResponse> {
+  return get<AgentTraceResponse>(`/generation-tasks/${generationId}/trace`);
+}
+
+export async function retryGenerationTask(
+  generationId: string,
+  requestId = crypto.randomUUID(),
+): Promise<CreateChatMessageResponse> {
+  return post<CreateChatMessageResponse>(
+    `/generation-tasks/${generationId}/retry`,
+    { requestId },
+  );
 }
 
 /**
@@ -337,6 +448,9 @@ export interface DocumentVO {
   filename: string;
   filetype: string;
   size: number;
+  indexStatus: "EMPTY" | "READY";
+  indexVersion: number;
+  chunkCount: number;
 }
 
 export interface GetDocumentsResponse {
@@ -345,6 +459,11 @@ export interface GetDocumentsResponse {
 
 export interface CreateDocumentResponse {
   documentId: string;
+  indexAction: "CREATED" | "UPDATED" | "UNCHANGED" | "CREATED_EMPTY";
+  indexVersion: number;
+  chunkCount: number;
+  reusedChunkCount: number;
+  embeddedChunkCount: number;
 }
 
 /**

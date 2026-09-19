@@ -1,10 +1,15 @@
 package com.kama.jmindops.agent.tools;
 
 
+import com.kama.jmindops.governance.RequiresToolApproval;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.stereotype.Component;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
@@ -12,14 +17,20 @@ import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-//@Component 禁用文件系统相关工具
-
+@Component
+@ConditionalOnProperty(name = "app.tools.filesystem.enabled", havingValue = "true")
 public class FileSystemTools implements Tool {
     private static final Logger log = LoggerFactory.getLogger(FileSystemTools.class);
+    private static final int MAX_PATH_LENGTH = 512;
+    private static final int MAX_READ_BYTES = 1_000_000;
+    private static final int MAX_WRITE_CHARS = 100_000;
+    private static final int MAX_LIST_ENTRIES = 200;
 
+    private final Path baseDirectory;
 
-    // 允许访问的基础目录，防止路径遍历攻击
-    private static final String BASE_DIRECTORY = System.getProperty("user.dir");
+    public FileSystemTools(@Value("${app.tools.filesystem.base-path:./data/mcp-workspace}") String baseDirectory) {
+        this.baseDirectory = Paths.get(baseDirectory).toAbsolutePath().normalize();
+    }
 
     @Override
     public String getName() {
@@ -57,6 +68,9 @@ public class FileSystemTools implements Tool {
             if (!Files.isRegularFile(path)) {
                 return "错误：路径不是文件 - " + filePath;
             }
+            if (Files.size(path) > MAX_READ_BYTES) {
+                return "错误：文件超过允许读取的大小上限";
+            }
 
             String content = Files.readString(path);
             log.info("成功读取文件: {}", filePath);
@@ -85,8 +99,10 @@ public class FileSystemTools implements Tool {
             name = "writeFile",
             description = "将内容写入指定文件。如果文件不存在则创建，如果文件存在则覆盖。参数：filePath - 文件路径（相对于工作目录），content - 要写入的内容"
     )
+    @RequiresToolApproval
     public String writeFile(String filePath, String content) {
         try {
+            validateWriteContent(content);
             Path path = validateAndResolvePath(filePath);
 
             // 确保父目录存在
@@ -123,8 +139,10 @@ public class FileSystemTools implements Tool {
             name = "appendToFile",
             description = "将内容追加到指定文件的末尾。如果文件不存在则创建。参数：filePath - 文件路径（相对于工作目录），content - 要追加的内容"
     )
+    @RequiresToolApproval
     public String appendToFile(String filePath, String content) {
         try {
+            validateWriteContent(content);
             Path path = validateAndResolvePath(filePath);
 
             // 确保父目录存在
@@ -164,7 +182,7 @@ public class FileSystemTools implements Tool {
         try {
             Path path;
             if (directoryPath == null || directoryPath.trim().isEmpty()) {
-                path = Paths.get(BASE_DIRECTORY);
+                path = validateAndResolvePath(".");
             } else {
                 path = validateAndResolvePath(directoryPath);
             }
@@ -177,22 +195,25 @@ public class FileSystemTools implements Tool {
                 return "错误：路径不是目录 - " + directoryPath;
             }
 
-            List<String> items = Files.list(path)
-                    .map(p -> {
-                        String name = p.getFileName().toString();
-                        if (Files.isDirectory(p)) {
-                            return "[DIR] " + name;
-                        } else {
+            List<String> items;
+            try (Stream<Path> paths = Files.list(path)) {
+                items = paths
+                        .limit(MAX_LIST_ENTRIES)
+                        .map(p -> {
+                            String name = p.getFileName().toString();
+                            if (Files.isDirectory(p)) {
+                                return "[DIR] " + name;
+                            }
                             try {
                                 long size = Files.size(p);
                                 return "[FILE] " + name + " (" + formatFileSize(size) + ")";
                             } catch (IOException e) {
                                 return "[FILE] " + name;
                             }
-                        }
-                    })
-                    .sorted()
-                    .collect(Collectors.toList());
+                        })
+                        .sorted()
+                        .collect(Collectors.toList());
+            }
 
             if (items.isEmpty()) {
                 return "目录为空: " + directoryPath;
@@ -223,9 +244,13 @@ public class FileSystemTools implements Tool {
             name = "deleteFile",
             description = "删除指定的文件或目录。参数：path - 文件或目录路径（相对于工作目录）"
     )
+    @RequiresToolApproval
     public String deleteFile(String path) {
         try {
             Path filePath = validateAndResolvePath(path);
+            if (filePath.equals(baseDirectory)) {
+                throw new SecurityException("禁止删除整个工具工作区");
+            }
 
             if (!Files.exists(filePath)) {
                 return "错误：文件或目录不存在 - " + path;
@@ -273,6 +298,7 @@ public class FileSystemTools implements Tool {
             name = "createDirectory",
             description = "创建指定目录，如果父目录不存在则一并创建。参数：directoryPath - 目录路径（相对于工作目录）"
     )
+    @RequiresToolApproval
     public String createDirectory(String directoryPath) {
         try {
             Path path = validateAndResolvePath(directoryPath);
@@ -312,16 +338,56 @@ public class FileSystemTools implements Tool {
         if (filePath == null || filePath.trim().isEmpty()) {
             throw new IllegalArgumentException("文件路径不能为空");
         }
+        if (filePath.length() > MAX_PATH_LENGTH) {
+            throw new SecurityException("文件路径过长");
+        }
 
-        Path basePath = Paths.get(BASE_DIRECTORY).toAbsolutePath().normalize();
-        Path resolvedPath = basePath.resolve(filePath).toAbsolutePath().normalize();
+        Path requestedPath = Paths.get(filePath);
+        if (requestedPath.isAbsolute()) {
+            throw new SecurityException("只允许使用相对路径");
+        }
+        for (Path segment : requestedPath) {
+            if (segment.toString().startsWith(".") && !".".equals(segment.toString())) {
+                throw new SecurityException("禁止访问隐藏文件或目录");
+            }
+        }
 
-        // 检查解析后的路径是否在基础目录内
-        if (!resolvedPath.startsWith(basePath)) {
+        Path resolvedPath = baseDirectory.resolve(requestedPath).toAbsolutePath().normalize();
+        if (!resolvedPath.startsWith(baseDirectory)) {
             throw new SecurityException("路径遍历攻击被阻止: " + filePath);
         }
 
+        try {
+            if (!Files.isDirectory(baseDirectory, LinkOption.NOFOLLOW_LINKS)) {
+                throw new SecurityException("工具工作区不存在或不是目录");
+            }
+            Path realBase = baseDirectory.toRealPath();
+            Path nearestExisting = resolvedPath;
+            while (nearestExisting != null
+                    && !Files.exists(nearestExisting, LinkOption.NOFOLLOW_LINKS)) {
+                nearestExisting = nearestExisting.getParent();
+            }
+            if (nearestExisting == null || !nearestExisting.toRealPath().startsWith(realBase)) {
+                throw new SecurityException("符号链接越界访问被阻止: " + filePath);
+            }
+            if (Files.exists(resolvedPath, LinkOption.NOFOLLOW_LINKS)
+                    && !resolvedPath.toRealPath().startsWith(realBase)) {
+                throw new SecurityException("符号链接越界访问被阻止: " + filePath);
+            }
+        } catch (IOException exception) {
+            throw new SecurityException("无法验证工具工作区路径", exception);
+        }
+
         return resolvedPath;
+    }
+
+    private void validateWriteContent(String content) {
+        if (content == null) {
+            throw new IllegalArgumentException("写入内容不能为空");
+        }
+        if (content.length() > MAX_WRITE_CHARS) {
+            throw new IllegalArgumentException("写入内容超过允许的大小上限");
+        }
     }
 
     /**

@@ -17,6 +17,8 @@ public class Document {
 
     private String filename;
 
+    private String sourceKey;
+
     private String filetype;
 
     private Long size;
@@ -24,19 +26,38 @@ public class Document {
     // JSON String
     private String metadata;
 
+    private String contentHash;
+
+    private String indexFingerprint;
+
+    private Integer indexVersion;
+
+    private String indexStatus;
+
+    private Integer chunkCount;
+
+    private LocalDateTime indexedAt;
+
     private LocalDateTime createdAt;
 
     private LocalDateTime updatedAt;
 
     
     public Document() {}
-    public Document(String id, String kbId, String filename, String filetype, Long size, String metadata, LocalDateTime createdAt, LocalDateTime updatedAt) {
+    public Document(String id, String kbId, String filename, String sourceKey, String filetype, Long size, String metadata, String contentHash, String indexFingerprint, Integer indexVersion, String indexStatus, Integer chunkCount, LocalDateTime indexedAt, LocalDateTime createdAt, LocalDateTime updatedAt) {
         this.id = id;
         this.kbId = kbId;
         this.filename = filename;
+        this.sourceKey = sourceKey;
         this.filetype = filetype;
         this.size = size;
         this.metadata = metadata;
+        this.contentHash = contentHash;
+        this.indexFingerprint = indexFingerprint;
+        this.indexVersion = indexVersion;
+        this.indexStatus = indexStatus;
+        this.chunkCount = chunkCount;
+        this.indexedAt = indexedAt;
         this.createdAt = createdAt;
         this.updatedAt = updatedAt;
     }
@@ -46,12 +67,26 @@ public class Document {
     public void setKbId(String kbId) { this.kbId = kbId; }
     public String getFilename() { return this.filename; }
     public void setFilename(String filename) { this.filename = filename; }
+    public String getSourceKey() { return this.sourceKey; }
+    public void setSourceKey(String sourceKey) { this.sourceKey = sourceKey; }
     public String getFiletype() { return this.filetype; }
     public void setFiletype(String filetype) { this.filetype = filetype; }
     public Long getSize() { return this.size; }
     public void setSize(Long size) { this.size = size; }
     public String getMetadata() { return this.metadata; }
     public void setMetadata(String metadata) { this.metadata = metadata; }
+    public String getContentHash() { return this.contentHash; }
+    public void setContentHash(String contentHash) { this.contentHash = contentHash; }
+    public String getIndexFingerprint() { return this.indexFingerprint; }
+    public void setIndexFingerprint(String indexFingerprint) { this.indexFingerprint = indexFingerprint; }
+    public Integer getIndexVersion() { return this.indexVersion; }
+    public void setIndexVersion(Integer indexVersion) { this.indexVersion = indexVersion; }
+    public String getIndexStatus() { return this.indexStatus; }
+    public void setIndexStatus(String indexStatus) { this.indexStatus = indexStatus; }
+    public Integer getChunkCount() { return this.chunkCount; }
+    public void setChunkCount(Integer chunkCount) { this.chunkCount = chunkCount; }
+    public LocalDateTime getIndexedAt() { return this.indexedAt; }
+    public void setIndexedAt(LocalDateTime indexedAt) { this.indexedAt = indexedAt; }
     public LocalDateTime getCreatedAt() { return this.createdAt; }
     public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
     public LocalDateTime getUpdatedAt() { return this.updatedAt; }
@@ -61,21 +96,35 @@ public class Document {
         private String id;
         private String kbId;
         private String filename;
+        private String sourceKey;
         private String filetype;
         private Long size;
         private String metadata;
+        private String contentHash;
+        private String indexFingerprint;
+        private Integer indexVersion;
+        private String indexStatus;
+        private Integer chunkCount;
+        private LocalDateTime indexedAt;
         private LocalDateTime createdAt;
         private LocalDateTime updatedAt;
         public DocumentBuilder() {}
         public DocumentBuilder id(String id) { this.id = id; return this; }
         public DocumentBuilder kbId(String kbId) { this.kbId = kbId; return this; }
         public DocumentBuilder filename(String filename) { this.filename = filename; return this; }
+        public DocumentBuilder sourceKey(String sourceKey) { this.sourceKey = sourceKey; return this; }
         public DocumentBuilder filetype(String filetype) { this.filetype = filetype; return this; }
         public DocumentBuilder size(Long size) { this.size = size; return this; }
         public DocumentBuilder metadata(String metadata) { this.metadata = metadata; return this; }
+        public DocumentBuilder contentHash(String contentHash) { this.contentHash = contentHash; return this; }
+        public DocumentBuilder indexFingerprint(String indexFingerprint) { this.indexFingerprint = indexFingerprint; return this; }
+        public DocumentBuilder indexVersion(Integer indexVersion) { this.indexVersion = indexVersion; return this; }
+        public DocumentBuilder indexStatus(String indexStatus) { this.indexStatus = indexStatus; return this; }
+        public DocumentBuilder chunkCount(Integer chunkCount) { this.chunkCount = chunkCount; return this; }
+        public DocumentBuilder indexedAt(LocalDateTime indexedAt) { this.indexedAt = indexedAt; return this; }
         public DocumentBuilder createdAt(LocalDateTime createdAt) { this.createdAt = createdAt; return this; }
         public DocumentBuilder updatedAt(LocalDateTime updatedAt) { this.updatedAt = updatedAt; return this; }
-        public Document build() { return new Document(id, kbId, filename, filetype, size, metadata, createdAt, updatedAt); }
+        public Document build() { return new Document(id, kbId, filename, sourceKey, filetype, size, metadata, contentHash, indexFingerprint, indexVersion, indexStatus, chunkCount, indexedAt, createdAt, updatedAt); }
     }
 
     @Override

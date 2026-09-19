@@ -37,8 +37,10 @@ class ChatGenerationCoordinatorTest {
                         exception -> assertThat(exception.getCode()).isEqualTo(409));
         assertThat(coordinator.claim("session-1", generationId)).isTrue();
         assertThat(coordinator.claim("session-1", generationId)).isFalse();
+        assertThat(coordinator.runningGenerationsSnapshot()).containsEntry("session-1", generationId);
 
         coordinator.release("session-1", generationId);
+        assertThat(coordinator.runningGenerationsSnapshot()).isEmpty();
         String nextGenerationId = coordinator.reserve("session-1");
         assertThat(nextGenerationId).isNotEqualTo(generationId);
     }
@@ -50,6 +52,17 @@ class ChatGenerationCoordinatorTest {
 
         assertThat(coordinator.claim("session-1", "other-generation")).isFalse();
         assertThat(coordinator.claim("session-1", generationId)).isTrue();
+    }
+
+    @Test
+    void restoresOnlyTheSamePendingGenerationInMemory() {
+        ChatGenerationCoordinator coordinator = new ChatGenerationCoordinator();
+
+        assertThat(coordinator.restoreReservation("session-recovery", "generation-a")).isTrue();
+        assertThat(coordinator.restoreReservation("session-recovery", "generation-a")).isTrue();
+        assertThat(coordinator.restoreReservation("session-recovery", "generation-b")).isFalse();
+        assertThat(coordinator.claim("session-recovery", "generation-a")).isTrue();
+        assertThat(coordinator.restoreReservation("session-recovery", "generation-a")).isFalse();
     }
 
     @Test

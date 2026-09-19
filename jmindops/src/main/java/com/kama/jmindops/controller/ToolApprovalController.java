@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.Map;
@@ -35,6 +36,7 @@ public class ToolApprovalController {
     }
 
     @PostMapping("/{approvalId}/approve")
+    @Transactional
     public ApiResponse<Void> approve(@PathVariable String approvalId) {
         ToolGovernanceService.ApprovalRecord record = toolGovernanceService.decide(approvalId, true);
         ChatSession session = resourceAccessService.requireOwnedChatSession(record.sessionId());
@@ -51,6 +53,7 @@ public class ToolApprovalController {
     }
 
     @PostMapping("/{approvalId}/reject")
+    @Transactional
     public ApiResponse<Void> reject(@PathVariable String approvalId) {
         ToolGovernanceService.ApprovalRecord record = toolGovernanceService.decide(approvalId, false);
         ChatSession session = resourceAccessService.requireOwnedChatSession(record.sessionId());

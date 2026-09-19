@@ -13,18 +13,28 @@ public class ChunkBgeM3 {
     private String id;
     private String kbId;
     private String docId;
+    private String sourceKey;
     private String content;
+    private String chunkHash;
+    private String indexFingerprint;
+    private Integer chunkIndex;
+    private Integer documentVersion;
     private float[] embedding;
     private String metadata;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
     public ChunkBgeM3() {}
-    public ChunkBgeM3(String id, String kbId, String docId, String content, float[] embedding, String metadata, LocalDateTime createdAt, LocalDateTime updatedAt) {
+    public ChunkBgeM3(String id, String kbId, String docId, String sourceKey, String content, String chunkHash, String indexFingerprint, Integer chunkIndex, Integer documentVersion, float[] embedding, String metadata, LocalDateTime createdAt, LocalDateTime updatedAt) {
         this.id = id;
         this.kbId = kbId;
         this.docId = docId;
+        this.sourceKey = sourceKey;
         this.content = content;
+        this.chunkHash = chunkHash;
+        this.indexFingerprint = indexFingerprint;
+        this.chunkIndex = chunkIndex;
+        this.documentVersion = documentVersion;
         this.embedding = embedding;
         this.metadata = metadata;
         this.createdAt = createdAt;
@@ -37,8 +47,18 @@ public class ChunkBgeM3 {
     public void setKbId(String kbId) { this.kbId = kbId; }
     public String getDocId() { return docId; }
     public void setDocId(String docId) { this.docId = docId; }
+    public String getSourceKey() { return sourceKey; }
+    public void setSourceKey(String sourceKey) { this.sourceKey = sourceKey; }
     public String getContent() { return content; }
     public void setContent(String content) { this.content = content; }
+    public String getChunkHash() { return chunkHash; }
+    public void setChunkHash(String chunkHash) { this.chunkHash = chunkHash; }
+    public String getIndexFingerprint() { return indexFingerprint; }
+    public void setIndexFingerprint(String indexFingerprint) { this.indexFingerprint = indexFingerprint; }
+    public Integer getChunkIndex() { return chunkIndex; }
+    public void setChunkIndex(Integer chunkIndex) { this.chunkIndex = chunkIndex; }
+    public Integer getDocumentVersion() { return documentVersion; }
+    public void setDocumentVersion(Integer documentVersion) { this.documentVersion = documentVersion; }
     public float[] getEmbedding() { return embedding; }
     public void setEmbedding(float[] embedding) { this.embedding = embedding; }
     public String getMetadata() { return metadata; }
@@ -53,7 +73,12 @@ public class ChunkBgeM3 {
         private String id;
         private String kbId;
         private String docId;
+        private String sourceKey;
         private String content;
+        private String chunkHash;
+        private String indexFingerprint;
+        private Integer chunkIndex;
+        private Integer documentVersion;
         private float[] embedding;
         private String metadata;
         private LocalDateTime createdAt;
@@ -63,12 +88,17 @@ public class ChunkBgeM3 {
         public ChunkBgeM3Builder id(String id) { this.id = id; return this; }
         public ChunkBgeM3Builder kbId(String kbId) { this.kbId = kbId; return this; }
         public ChunkBgeM3Builder docId(String docId) { this.docId = docId; return this; }
+        public ChunkBgeM3Builder sourceKey(String sourceKey) { this.sourceKey = sourceKey; return this; }
         public ChunkBgeM3Builder content(String content) { this.content = content; return this; }
+        public ChunkBgeM3Builder chunkHash(String chunkHash) { this.chunkHash = chunkHash; return this; }
+        public ChunkBgeM3Builder indexFingerprint(String indexFingerprint) { this.indexFingerprint = indexFingerprint; return this; }
+        public ChunkBgeM3Builder chunkIndex(Integer chunkIndex) { this.chunkIndex = chunkIndex; return this; }
+        public ChunkBgeM3Builder documentVersion(Integer documentVersion) { this.documentVersion = documentVersion; return this; }
         public ChunkBgeM3Builder embedding(float[] embedding) { this.embedding = embedding; return this; }
         public ChunkBgeM3Builder metadata(String metadata) { this.metadata = metadata; return this; }
         public ChunkBgeM3Builder createdAt(LocalDateTime createdAt) { this.createdAt = createdAt; return this; }
         public ChunkBgeM3Builder updatedAt(LocalDateTime updatedAt) { this.updatedAt = updatedAt; return this; }
-        public ChunkBgeM3 build() { return new ChunkBgeM3(id, kbId, docId, content, embedding, metadata, createdAt, updatedAt); }
+        public ChunkBgeM3 build() { return new ChunkBgeM3(id, kbId, docId, sourceKey, content, chunkHash, indexFingerprint, chunkIndex, documentVersion, embedding, metadata, createdAt, updatedAt); }
     }
 
     @Override

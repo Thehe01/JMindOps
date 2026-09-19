@@ -1,6 +1,11 @@
 package com.kama.jmindops.governance;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
+import com.kama.jmindops.exception.BizException;
 import com.kama.jmindops.security.AuthenticatedUser;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.core.Authentication;
@@ -11,8 +16,10 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.LocalDateTime;
 import java.util.HexFormat;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -30,6 +37,7 @@ public class ToolGovernanceService {
         AuthenticatedUser user = currentUser();
         String sessionId = requireSessionId();
         String argumentsJson = serialize(arguments);
+        String redactedArgumentsJson = maskSensitiveArguments(argumentsJson);
         String fingerprint = sha256("v2|" + user.id() + "|" + sessionId + "|"
                 + toolName + "|" + riskLevel + "|" + argumentsJson);
 
@@ -73,7 +81,7 @@ public class ToolGovernanceService {
                 INSERT INTO tool_approval
                 (id, user_id, session_id, tool_name, arguments_json, fingerprint, status, created_at, expires_at)
                 VALUES (CAST(? AS uuid), CAST(? AS uuid), CAST(? AS uuid), ?, CAST(? AS jsonb), ?, 'PENDING', NOW(), NOW() + INTERVAL '10 minutes')
-                """, approvalId, user.id(), sessionId, toolName, argumentsJson, fingerprint);
+                """, approvalId, user.id(), sessionId, toolName, redactedArgumentsJson, fingerprint);
         return ApprovalDecision.waiting(approvalId);
     }
 
@@ -111,6 +119,10 @@ public class ToolGovernanceService {
     private static final Pattern SENSITIVE_PATTERN = Pattern.compile(
             "(?i)\"(password|secret|token|apiKey|api_key|authorization|auth)\"\\s*:\\s*\"([^\"]+)\""
     );
+    private static final Set<String> SENSITIVE_FIELD_NAMES = Set.of(
+            "password", "passwordhash", "secret", "clientsecret", "token", "accesstoken",
+            "refreshtoken", "apikey", "authorization", "auth"
+    );
 
     public List<Map<String, Object>> getApprovalsForCurrentUser(String status) {
         AuthenticatedUser user = currentUser();
@@ -132,14 +144,15 @@ public class ToolGovernanceService {
 
     public ApprovalRecord decide(String approvalId, boolean approved) {
         AuthenticatedUser user = currentUser();
+        String validatedApprovalId = validateApprovalId(approvalId);
         List<Map<String, Object>> records = jdbcTemplate.queryForList("""
                 SELECT session_id::text AS "sessionId", tool_name AS "toolName"
                 FROM tool_approval
                 WHERE id = CAST(? AS uuid) AND user_id = CAST(? AS uuid)
                   AND status = 'PENDING' AND expires_at > NOW()
-                """, approvalId, user.id());
+                """, validatedApprovalId, user.id());
         if (records.isEmpty()) {
-            throw new IllegalArgumentException("Approval does not exist or can no longer be decided");
+            throw new BizException(409, "Approval does not exist or can no longer be decided");
         }
         String sessionId = (String) records.get(0).get("sessionId");
         String toolName = (String) records.get(0).get("toolName");
@@ -148,18 +161,81 @@ public class ToolGovernanceService {
                 UPDATE tool_approval SET status = ?, decided_at = NOW()
                 WHERE id = CAST(? AS uuid) AND user_id = CAST(? AS uuid)
                   AND status = 'PENDING' AND expires_at > NOW()
-                """, approved ? "APPROVED" : "REJECTED", approvalId, user.id());
+                """, approved ? "APPROVED" : "REJECTED", validatedApprovalId, user.id());
         if (updated == 0) {
-            throw new IllegalArgumentException("Approval does not exist or can no longer be decided");
+            throw new BizException(409, "Approval does not exist or can no longer be decided");
         }
-        return new ApprovalRecord(approvalId, sessionId, toolName, approved);
+        return new ApprovalRecord(validatedApprovalId, sessionId, toolName, approved);
     }
 
     public String maskSensitiveArguments(String argumentsJson) {
         if (argumentsJson == null || argumentsJson.isBlank()) {
             return argumentsJson;
         }
-        return SENSITIVE_PATTERN.matcher(argumentsJson).replaceAll("\"$1\":\"******\"");
+        try {
+            JsonNode parsed = objectMapper.readTree(argumentsJson);
+            return objectMapper.writeValueAsString(redactNode(parsed));
+        } catch (Exception ignored) {
+            return SENSITIVE_PATTERN.matcher(argumentsJson).replaceAll("\"$1\":\"******\"");
+        }
+    }
+
+    private JsonNode redactNode(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return node;
+        }
+        if (node.isObject()) {
+            ObjectNode redacted = ((ObjectNode) node).deepCopy();
+            List<String> fieldNames = new ArrayList<>();
+            redacted.fieldNames().forEachRemaining(fieldNames::add);
+            for (String fieldName : fieldNames) {
+                if (isSensitiveField(fieldName)) {
+                    redacted.put(fieldName, "******");
+                } else {
+                    redacted.set(fieldName, redactNode(redacted.get(fieldName)));
+                }
+            }
+            return redacted;
+        }
+        if (node.isArray()) {
+            ArrayNode redacted = ((ArrayNode) node).deepCopy();
+            for (int index = 0; index < redacted.size(); index++) {
+                redacted.set(index, redactNode(redacted.get(index)));
+            }
+            return redacted;
+        }
+        if (node.isTextual()) {
+            String value = node.textValue();
+            String trimmed = value == null ? "" : value.trim();
+            if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+                try {
+                    JsonNode nested = objectMapper.readTree(trimmed);
+                    return TextNode.valueOf(objectMapper.writeValueAsString(redactNode(nested)));
+                } catch (Exception ignored) {
+                    // Preserve non-JSON strings exactly; the outer fallback remains available.
+                }
+            }
+        }
+        return node.deepCopy();
+    }
+
+    private boolean isSensitiveField(String fieldName) {
+        String normalized = fieldName == null
+                ? ""
+                : fieldName.replace("_", "").replace("-", "").toLowerCase(java.util.Locale.ROOT);
+        return SENSITIVE_FIELD_NAMES.contains(normalized);
+    }
+
+    private String validateApprovalId(String approvalId) {
+        try {
+            UUID parsed = UUID.fromString(approvalId);
+            if (!parsed.toString().equalsIgnoreCase(approvalId)) {
+                throw new IllegalArgumentException("non-canonical uuid");
+            }
+            return parsed.toString();
+        } catch (RuntimeException exception) {
+            throw new BizException(400, "Approval id is invalid");
+        }
     }
 
     private AuthenticatedUser currentUser() {

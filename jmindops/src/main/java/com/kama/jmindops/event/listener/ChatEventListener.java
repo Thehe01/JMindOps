@@ -9,11 +9,23 @@ import com.kama.jmindops.event.ChatEvent;
 import com.kama.jmindops.agent.RouterAgent;
 import com.kama.jmindops.agent.RoutingDecision;
 import com.kama.jmindops.message.SseMessage;
+import com.kama.jmindops.model.entity.GenerationTask;
+import com.kama.jmindops.security.AuthenticatedUser;
 import com.kama.jmindops.service.ChatGenerationCoordinator;
+import com.kama.jmindops.service.GenerationTaskStore;
+import com.kama.jmindops.service.AgentTraceStore;
 import com.kama.jmindops.service.SseService;
-import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Async;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.context.SecurityContext;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.event.TransactionPhase;
+import org.springframework.transaction.event.TransactionalEventListener;
+
+import java.util.List;
+import java.util.Optional;
 
 @Component
 public class ChatEventListener {
@@ -24,20 +36,31 @@ public class ChatEventListener {
     private final RouterAgent routerAgent;
     private final SseService sseService;
     private final ChatGenerationCoordinator chatGenerationCoordinator;
-    public ChatEventListener(JMindOpsFactory jMindOpsFactory, RouterAgent routerAgent, SseService sseService, ChatGenerationCoordinator chatGenerationCoordinator) {
+    private final GenerationTaskStore generationTaskStore;
+    private final AgentTraceStore agentTraceStore;
+    public ChatEventListener(JMindOpsFactory jMindOpsFactory, RouterAgent routerAgent, SseService sseService, ChatGenerationCoordinator chatGenerationCoordinator, GenerationTaskStore generationTaskStore, AgentTraceStore agentTraceStore) {
         this.jMindOpsFactory = jMindOpsFactory;
         this.routerAgent = routerAgent;
         this.sseService = sseService;
         this.chatGenerationCoordinator = chatGenerationCoordinator;
+        this.generationTaskStore = generationTaskStore;
+        this.agentTraceStore = agentTraceStore;
     }
 
 
     @Async
-    @EventListener
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT, fallbackExecution = true)
     public void handle(ChatEvent event) {
-        String sessionId = event.getSessionId();
         String generationId = event.getGenerationId();
+        Optional<GenerationTask> persisted = generationTaskStore.findExecutionTask(generationId);
+        if (persisted.isEmpty()) {
+            log.warn("Ignoring generation without a persisted task: generationId={}", generationId);
+            return;
+        }
+        GenerationTask task = persisted.get();
+        String sessionId = task.sessionId();
         boolean claimed = false;
+        SecurityContext previousContext = SecurityContextHolder.getContext();
 
         try {
             if (!chatGenerationCoordinator.claim(sessionId, generationId)) {
@@ -46,31 +69,63 @@ public class ChatEventListener {
                 return;
             }
             claimed = true;
+            if (!generationTaskStore.markRunning(generationId)) {
+                log.warn("Ignoring generation whose task is no longer PENDING: generationId={}, status={}",
+                        generationId, task.status());
+                return;
+            }
+            installExecutionSecurityContext(task);
 
             log.info("Received ChatEvent: sessionId={}, generationId={}, inputLength={}",
-                    sessionId, generationId, event.getUserInput() == null ? 0 : event.getUserInput().length());
+                    sessionId, generationId, task.inputContent().length());
 
             // 1. 调用意图重写器，结合上下文补全省略语
-            String rewrittenInput = routerAgent.rewrite(sessionId, event.getUserInput());
+            String rewrittenInput = routerAgent.rewrite(sessionId, task.inputContent());
+            generationTaskStore.touchHeartbeat(generationId);
 
             // 2. 调用意图路由代理进行分类（使用重写后的文本）
             RoutingDecision decision = routerAgent.route(rewrittenInput);
+            agentTraceStore.recordRouting(generationId, decision.name());
+            generationTaskStore.touchHeartbeat(generationId);
             log.info("Routing decision: sessionId={}, generationId={}, decision={}",
                     sessionId, generationId, decision);
 
             // 3. 将路由决策传给工厂，创建并定制专门的 Agent 实例
             JMindOps jMindOps = jMindOpsFactory.create(
-                    event.getAgentId(), sessionId, decision, generationId);
+                    task.agentId(), sessionId, decision, generationId, rewrittenInput);
+            generationTaskStore.touchHeartbeat(generationId);
             jMindOps.run();
-            sendTerminal(sessionId, generationId, SseMessage.Type.AI_DONE, "生成完成");
+            if (generationTaskStore.markSucceeded(generationId)) {
+                sendTerminal(sessionId, generationId, SseMessage.Type.AI_DONE, "生成完成");
+            } else {
+                log.warn("Generation completed after its persistent task left RUNNING: generationId={}", generationId);
+                sendTerminal(sessionId, generationId, SseMessage.Type.AI_ERROR, "任务状态已失效，请重试");
+            }
         } catch (Exception e) {
             log.error("Agent generation failed: sessionId={}, generationId={}", sessionId, generationId, e);
+            try {
+                generationTaskStore.markFailed(generationId, e.getMessage());
+            } catch (Exception persistenceError) {
+                log.error("Failed to persist generation failure: generationId={}", generationId, persistenceError);
+            }
             sendTerminal(sessionId, generationId, SseMessage.Type.AI_ERROR, "生成失败，请稍后重试");
         } finally {
+            SecurityContextHolder.setContext(previousContext);
             if (claimed) {
                 chatGenerationCoordinator.release(sessionId, generationId);
             }
         }
+    }
+
+    private void installExecutionSecurityContext(GenerationTask task) {
+        SecurityContext context = SecurityContextHolder.createEmptyContext();
+        AuthenticatedUser user = new AuthenticatedUser(task.userId(), task.username(), task.role());
+        context.setAuthentication(new UsernamePasswordAuthenticationToken(
+                user,
+                null,
+                List.of(new SimpleGrantedAuthority("ROLE_" + task.role()))
+        ));
+        SecurityContextHolder.setContext(context);
     }
 
     private void sendTerminal(

@@ -33,7 +33,6 @@ public class RedisConfig {
 
     @Bean(destroyMethod = "shutdown")
     @ConditionalOnMissingBean(RedissonClient.class)
-    @ConditionalOnProperty(name = "spring.data.redis.redisson.enabled", havingValue = "true", matchIfMissing = false)
     public RedissonClient redissonClient() {
         Config config = new Config();
         String address = "redis://" + redisHost + ":" + redisPort;

@@ -8,16 +8,24 @@
         <id property="id" column="id" jdbcType="VARCHAR"/>
         <result property="kbId" column="kb_id" jdbcType="VARCHAR"/>
         <result property="filename" column="filename" jdbcType="VARCHAR"/>
+        <result property="sourceKey" column="source_key" jdbcType="VARCHAR"/>
         <result property="filetype" column="filetype" jdbcType="VARCHAR"/>
         <result property="size" column="size" jdbcType="BIGINT"/>
         <result property="metadata" column="metadata" jdbcType="VARCHAR"/>
+        <result property="contentHash" column="content_hash" jdbcType="VARCHAR"/>
+        <result property="indexFingerprint" column="index_fingerprint" jdbcType="VARCHAR"/>
+        <result property="indexVersion" column="index_version" jdbcType="INTEGER"/>
+        <result property="indexStatus" column="index_status" jdbcType="VARCHAR"/>
+        <result property="chunkCount" column="chunk_count" jdbcType="INTEGER"/>
+        <result property="indexedAt" column="indexed_at" jdbcType="TIMESTAMP"/>
         <result property="createdAt" column="created_at" jdbcType="TIMESTAMP"/>
         <result property="updatedAt" column="updated_at" jdbcType="TIMESTAMP"/>
     </resultMap>
 
     <sql id="Base_Column_List">
-        id,kb_id,filename,
-        filetype,size,metadata,
+        id,kb_id,filename,source_key,
+        filetype,size,metadata,content_hash,index_fingerprint,
+        index_version,index_status,chunk_count,indexed_at,
         created_at,updated_at
     </sql>
 
@@ -25,21 +33,37 @@
             keyColumn="id" keyProperty="id" useGeneratedKeys="true">
         INSERT INTO document
         (
+            id,
             kb_id,
             filename,
+            source_key,
             filetype,
             size,
             metadata,
+            content_hash,
+            index_fingerprint,
+            index_version,
+            index_status,
+            chunk_count,
+            indexed_at,
             created_at,
             updated_at
         )
         VALUES
             (
+                COALESCE(CAST(#{id} AS uuid), gen_random_uuid()),
                 CAST(#{kbId} AS uuid),
                 #{filename},
+                #{sourceKey},
                 #{filetype},
                 #{size},
                 CAST(#{metadata} AS jsonb),
+                #{contentHash},
+                #{indexFingerprint},
+                COALESCE(#{indexVersion}, 0),
+                COALESCE(#{indexStatus}, 'EMPTY'),
+                COALESCE(#{chunkCount}, 0),
+                #{indexedAt},
                 #{createdAt},
                 #{updatedAt}
             )
@@ -50,9 +74,16 @@
             id,
             kb_id,
             filename,
+            source_key,
             filetype,
             size,
             metadata::text AS metadata,
+            content_hash,
+            index_fingerprint,
+            index_version,
+            index_status,
+            chunk_count,
+            indexed_at,
             created_at,
             updated_at
         FROM document
@@ -64,9 +95,16 @@
             id,
             kb_id,
             filename,
+            source_key,
             filetype,
             size,
             metadata::text AS metadata,
+            content_hash,
+            index_fingerprint,
+            index_version,
+            index_status,
+            chunk_count,
+            indexed_at,
             created_at,
             updated_at
         FROM document
@@ -74,8 +112,9 @@
     </select>
 
     <select id="selectAllByOwner" resultMap="BaseResultMap">
-        SELECT d.id, d.kb_id, d.filename, d.filetype, d.size,
-               d.metadata::text AS metadata, d.created_at, d.updated_at
+        SELECT d.id, d.kb_id, d.filename, d.source_key, d.filetype, d.size,
+               d.metadata::text AS metadata, d.content_hash, d.index_fingerprint, d.index_version,
+               d.index_status, d.chunk_count, d.indexed_at, d.created_at, d.updated_at
         FROM document d
         INNER JOIN knowledge_base kb ON kb.id = d.kb_id
         WHERE kb.owner_id = CAST(#{ownerId} AS uuid)
@@ -87,14 +126,31 @@
             id,
             kb_id,
             filename,
+            source_key,
             filetype,
             size,
             metadata::text AS metadata,
+            content_hash,
+            index_fingerprint,
+            index_version,
+            index_status,
+            chunk_count,
+            indexed_at,
             created_at,
             updated_at
         FROM document
         WHERE kb_id = CAST(#{kbId} AS uuid)
         ORDER BY updated_at DESC
+    </select>
+
+    <select id="selectByKbIdAndSourceKey" resultMap="BaseResultMap">
+        SELECT id, kb_id, filename, source_key, filetype, size,
+               metadata::text AS metadata, content_hash, index_fingerprint, index_version,
+               index_status, chunk_count, indexed_at, created_at, updated_at
+        FROM document
+        WHERE kb_id = CAST(#{kbId} AS uuid)
+          AND source_key = #{sourceKey}
+        LIMIT 1
     </select>
 
     <delete id="deleteById">
@@ -110,6 +166,9 @@
             <if test="filename != null">
                 filename = #{filename},
             </if>
+            <if test="sourceKey != null">
+                source_key = #{sourceKey},
+            </if>
             <if test="filetype != null">
                 filetype = #{filetype},
             </if>
@@ -119,8 +178,44 @@
             <if test="metadata != null">
                 metadata = CAST(#{metadata} AS jsonb),
             </if>
+            <if test="contentHash != null">
+                content_hash = #{contentHash},
+            </if>
+            <if test="indexFingerprint != null">
+                index_fingerprint = #{indexFingerprint},
+            </if>
+            <if test="indexVersion != null">
+                index_version = #{indexVersion},
+            </if>
+            <if test="indexStatus != null">
+                index_status = #{indexStatus},
+            </if>
+            <if test="chunkCount != null">
+                chunk_count = #{chunkCount},
+            </if>
+            <if test="indexedAt != null">
+                indexed_at = #{indexedAt},
+            </if>
             updated_at = NOW()
         </set>
         WHERE id = CAST(#{id} AS uuid)
+    </update>
+
+    <update id="updateIndexByVersion">
+        UPDATE document
+        SET filename = #{document.filename},
+            source_key = #{document.sourceKey},
+            filetype = #{document.filetype},
+            size = #{document.size},
+            metadata = CAST(#{document.metadata} AS jsonb),
+            content_hash = #{document.contentHash},
+            index_fingerprint = #{document.indexFingerprint},
+            index_version = #{document.indexVersion},
+            index_status = #{document.indexStatus},
+            chunk_count = #{document.chunkCount},
+            indexed_at = #{document.indexedAt},
+            updated_at = #{document.updatedAt}
+        WHERE id = CAST(#{document.id} AS uuid)
+          AND index_version = #{expectedVersion}
     </update>
 </mapper>

@@ -7,6 +7,7 @@ import {
   createChatMessage,
   getChatMessagesBySessionId,
   getChatSession,
+  retryGenerationTask,
 } from "../../api/api.ts";
 import { SSE_BASE_URL } from "../../api/http.ts";
 import { streamSse, waitForReconnect } from "../../api/sse.ts";
@@ -19,6 +20,7 @@ import EmptyAgentChatView from "./agentChatView/EmptyAgentChatView.tsx";
 import { useAgents } from "../../hooks/useAgents.ts";
 import type { ChatMessageVO, SseMessage, SseMessageType } from "../../types";
 import ToolApprovalPanel from "./agentChatView/ToolApprovalPanel.tsx";
+import AgentTracePanel from "./agentChatView/AgentTracePanel.tsx";
 
 interface ChatRouteState {
   initialMessage?: string;
@@ -91,6 +93,10 @@ const AgentChatView = () => {
     useState<ConnectionStatus>("connecting");
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
+  const [failedGenerationId, setFailedGenerationId] = useState<string | null>(null);
+  const [retryingGeneration, setRetryingGeneration] = useState(false);
+  const [traceGenerationId, setTraceGenerationId] = useState<string | null>(null);
+  const [traceOpen, setTraceOpen] = useState(false);
   const [reconnectNonce, setReconnectNonce] = useState(0);
 
   // AgentChatView 由路由层按 sessionId 设置 key。每个会话实例只提交自己的首条消息。
@@ -102,6 +108,7 @@ const AgentChatView = () => {
   const connectedOnce = useRef(false);
   const activeGenerationIdRef = useRef<string | null>(null);
   const lastTerminalGenerationIdRef = useRef<string | null>(null);
+  const pendingSendRef = useRef<{ key: string; requestId: string } | null>(null);
 
   const refreshChatMessages = useCallback(
     async (signal?: AbortSignal) => {
@@ -203,18 +210,37 @@ const AgentChatView = () => {
       setSending(true);
       setGenerating(true);
       setStreamError(null);
+      const sendKey = JSON.stringify([targetAgentId, chatSessionId, content]);
+      const requestId =
+        pendingSendRef.current?.key === sendKey
+          ? pendingSendRef.current.requestId
+          : crypto.randomUUID();
+      pendingSendRef.current = { key: sendKey, requestId };
       try {
         const response = await createChatMessage({
+          requestId,
           agentId: targetAgentId,
           sessionId: chatSessionId,
-          role: "user",
           content,
         });
+        pendingSendRef.current = null;
         if (
           response.generationId &&
+          (response.status === "PENDING" || response.status === "RUNNING") &&
           response.generationId !== lastTerminalGenerationIdRef.current
         ) {
+          setTraceGenerationId(response.generationId);
           activeGenerationIdRef.current = response.generationId;
+          setFailedGenerationId(null);
+        } else if (
+          response.status === "SUCCEEDED" ||
+          response.status === "FAILED"
+        ) {
+          activeGenerationIdRef.current = null;
+          setGenerating(false);
+          if (response.status === "FAILED" && response.generationId) {
+            setFailedGenerationId(response.generationId);
+          }
         }
         try {
           await refreshChatMessages();
@@ -258,6 +284,7 @@ const AgentChatView = () => {
       const temporaryMessageId = `stream:${generationId || chatSessionId}`;
 
       if (generationId) {
+        setTraceGenerationId(generationId);
         const activeGenerationId = activeGenerationIdRef.current;
         if (activeGenerationId && generationId !== activeGenerationId) {
           return;
@@ -345,6 +372,7 @@ const AgentChatView = () => {
         setDisplayAgentStatus(false);
         setAgentStatusText("");
         setAgentStatusType(undefined);
+        setFailedGenerationId(null);
         void refreshChatMessages();
         void refreshPendingApprovals();
         return;
@@ -357,6 +385,7 @@ const AgentChatView = () => {
         setDisplayAgentStatus(false);
         setAgentStatusText("");
         setAgentStatusType(undefined);
+        setFailedGenerationId(generationId || null);
         setStreamError(
           sseMessage.payload?.error ||
             sseMessage.payload?.statusText ||
@@ -366,6 +395,30 @@ const AgentChatView = () => {
     },
     [chatSessionId, refreshChatMessages, refreshPendingApprovals],
   );
+
+  const retryFailedGeneration = useCallback(async () => {
+    if (!failedGenerationId) {
+      setReconnectNonce((value) => value + 1);
+      return;
+    }
+    setRetryingGeneration(true);
+    try {
+      const response = await retryGenerationTask(failedGenerationId);
+      if (
+        response.generationId &&
+        (response.status === "PENDING" || response.status === "RUNNING")
+      ) {
+        activeGenerationIdRef.current = response.generationId;
+        setGenerating(true);
+        setFailedGenerationId(null);
+        setStreamError(null);
+      }
+    } catch (error) {
+      setStreamError(error instanceof Error ? error.message : "任务重试失败");
+    } finally {
+      setRetryingGeneration(false);
+    }
+  }, [failedGenerationId]);
 
   useEffect(() => {
     if (!chatSessionId) return;
@@ -493,9 +546,10 @@ const AgentChatView = () => {
           action={
             <Button
               size="small"
-              onClick={() => setReconnectNonce((value) => value + 1)}
+              loading={retryingGeneration}
+              onClick={() => void retryFailedGeneration()}
             >
-              重试
+              {failedGenerationId ? "重试任务" : "重新连接"}
             </Button>
           }
         />
@@ -516,6 +570,13 @@ const AgentChatView = () => {
             </Button>
           }
         />
+      )}
+      {traceGenerationId && (
+        <div className="flex justify-end border-b border-gray-100 bg-white px-4 py-2">
+          <Button size="small" onClick={() => setTraceOpen(true)}>
+            查看执行轨迹
+          </Button>
+        </div>
       )}
       {sessionLoading && messages.length === 0 ? (
         <div className="flex flex-1 items-center justify-center text-gray-400">
@@ -549,6 +610,11 @@ const AgentChatView = () => {
             setDecidingApprovalId(null);
           }
         }}
+      />
+      <AgentTracePanel
+        generationId={traceGenerationId}
+        open={traceOpen}
+        onClose={() => setTraceOpen(false)}
       />
       <div className="border-t border-gray-200 bg-white p-4">
         <AgentChatInput

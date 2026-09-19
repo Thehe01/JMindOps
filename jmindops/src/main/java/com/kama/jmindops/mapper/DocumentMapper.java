@@ -2,6 +2,7 @@ package com.kama.jmindops.mapper;
 
 import com.kama.jmindops.model.entity.Document;
 import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Param;
 
 import java.util.List;
 
@@ -23,7 +24,17 @@ public interface DocumentMapper {
 
     List<Document> selectByKbId(String kbId);
 
+    Document selectByKbIdAndSourceKey(
+            @Param("kbId") String kbId,
+            @Param("sourceKey") String sourceKey
+    );
+
     int deleteById(String id);
 
     int updateById(Document document);
+
+    int updateIndexByVersion(
+            @Param("document") Document document,
+            @Param("expectedVersion") int expectedVersion
+    );
 }

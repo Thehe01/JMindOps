@@ -64,7 +64,11 @@ public class DocumentConverter {
     }
 
     public DocumentVO toVO(Document document) throws JsonProcessingException {
-        return toVO(toDTO(document));
+        DocumentVO vo = toVO(toDTO(document));
+        vo.setIndexStatus(document.getIndexStatus());
+        vo.setIndexVersion(document.getIndexVersion());
+        vo.setChunkCount(document.getChunkCount());
+        return vo;
     }
 
     public DocumentDTO toDTO(CreateDocumentRequest request) {

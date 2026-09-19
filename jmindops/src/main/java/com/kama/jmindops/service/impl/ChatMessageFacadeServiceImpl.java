@@ -7,6 +7,7 @@ import com.kama.jmindops.exception.BizException;
 import com.kama.jmindops.mapper.ChatMessageMapper;
 import com.kama.jmindops.model.dto.ChatMessageDTO;
 import com.kama.jmindops.model.entity.ChatMessage;
+import com.kama.jmindops.model.entity.GenerationTask;
 import com.kama.jmindops.model.request.CreateChatMessageRequest;
 import com.kama.jmindops.model.request.UpdateChatMessageRequest;
 import com.kama.jmindops.model.response.CreateChatMessageResponse;
@@ -14,16 +15,23 @@ import com.kama.jmindops.model.response.GetChatMessagesResponse;
 import com.kama.jmindops.model.vo.ChatMessageVO;
 import com.kama.jmindops.service.ChatMessageFacadeService;
 import com.kama.jmindops.service.ChatGenerationCoordinator;
+import com.kama.jmindops.service.GenerationRequestFingerprint;
+import com.kama.jmindops.service.GenerationTaskStore;
 import com.kama.jmindops.security.ResourceAccessService;
 import com.kama.jmindops.model.entity.ChatSession;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.UUID;
 
 @Service
 public class ChatMessageFacadeServiceImpl implements ChatMessageFacadeService {
@@ -33,12 +41,14 @@ public class ChatMessageFacadeServiceImpl implements ChatMessageFacadeService {
     private final ApplicationEventPublisher publisher;
     private final ResourceAccessService resourceAccessService;
     private final ChatGenerationCoordinator chatGenerationCoordinator;
-    public ChatMessageFacadeServiceImpl(ChatMessageMapper chatMessageMapper, ChatMessageConverter chatMessageConverter, ApplicationEventPublisher publisher, ResourceAccessService resourceAccessService, ChatGenerationCoordinator chatGenerationCoordinator) {
+    private final GenerationTaskStore generationTaskStore;
+    public ChatMessageFacadeServiceImpl(ChatMessageMapper chatMessageMapper, ChatMessageConverter chatMessageConverter, ApplicationEventPublisher publisher, ResourceAccessService resourceAccessService, ChatGenerationCoordinator chatGenerationCoordinator, GenerationTaskStore generationTaskStore) {
         this.chatMessageMapper = chatMessageMapper;
         this.chatMessageConverter = chatMessageConverter;
         this.publisher = publisher;
         this.resourceAccessService = resourceAccessService;
         this.chatGenerationCoordinator = chatGenerationCoordinator;
+        this.generationTaskStore = generationTaskStore;
     }
 
 
@@ -82,16 +92,39 @@ public class ChatMessageFacadeServiceImpl implements ChatMessageFacadeService {
     }
 
     @Override
+    @Transactional
     public CreateChatMessageResponse createChatMessage(CreateChatMessageRequest request) {
         validateExternalCreateRequest(request);
         ChatSession session = resourceAccessService.requireOwnedChatSession(request.getSessionId());
         if (!Objects.equals(session.getAgentId(), request.getAgentId())) {
             throw new BizException("消息所属智能体与会话不匹配");
         }
+        String userId = resourceAccessService.currentUserId();
+        String requestId = normalizeRequestId(request.getRequestId());
+        String fingerprint = GenerationRequestFingerprint.create(
+                request.getAgentId(), request.getSessionId(), request.getContent());
+        generationTaskStore.lockIdempotencyKey(userId, requestId);
+        Optional<GenerationTask> existingTask = generationTaskStore.findByUserAndRequestId(userId, requestId);
+        if (existingTask.isPresent()) {
+            return replay(existingTask.get(), fingerprint);
+        }
+
         String generationId = chatGenerationCoordinator.reserve(request.getSessionId());
+        releaseReservationOnRollback(request.getSessionId(), generationId);
         try {
             // converter 在服务端强制 USER/null metadata，不信任客户端提交的角色或运行元数据。
             ChatMessage chatMessage = doCreateChatMessage(request);
+            generationTaskStore.createPending(
+                    generationId,
+                    null,
+                    userId,
+                    requestId,
+                    fingerprint,
+                    request.getAgentId(),
+                    request.getSessionId(),
+                    chatMessage.getId(),
+                    request.getContent()
+            );
             publisher.publishEvent(new ChatEvent(
                             request.getAgentId(),
                             chatMessage.getSessionId(),
@@ -102,11 +135,56 @@ public class ChatMessageFacadeServiceImpl implements ChatMessageFacadeService {
             return CreateChatMessageResponse.builder()
                     .chatMessageId(chatMessage.getId())
                     .generationId(generationId)
+                    .requestId(requestId)
+                    .status(GenerationTask.Status.PENDING.name())
+                    .idempotentReplay(false)
                     .build();
         } catch (RuntimeException exception) {
             chatGenerationCoordinator.release(request.getSessionId(), generationId);
             throw exception;
         }
+    }
+
+    private CreateChatMessageResponse replay(GenerationTask task, String fingerprint) {
+        if (!task.requestFingerprint().equals(fingerprint)) {
+            throw new BizException(409, "同一 requestId 不能用于不同的消息请求");
+        }
+        return CreateChatMessageResponse.builder()
+                .chatMessageId(task.userMessageId())
+                .generationId(task.id())
+                .requestId(task.requestId())
+                .status(task.status().name())
+                .idempotentReplay(true)
+                .build();
+    }
+
+    private String normalizeRequestId(String requestId) {
+        if (!StringUtils.hasText(requestId)) {
+            return UUID.randomUUID().toString();
+        }
+        try {
+            String canonical = UUID.fromString(requestId).toString();
+            if (!canonical.equalsIgnoreCase(requestId)) {
+                throw new IllegalArgumentException("non-canonical uuid");
+            }
+            return canonical;
+        } catch (IllegalArgumentException exception) {
+            throw new BizException(400, "requestId 必须是标准 UUID");
+        }
+    }
+
+    private void releaseReservationOnRollback(String sessionId, String generationId) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCompletion(int status) {
+                if (status != TransactionSynchronization.STATUS_COMMITTED) {
+                    chatGenerationCoordinator.release(sessionId, generationId);
+                }
+            }
+        });
     }
 
     @Override

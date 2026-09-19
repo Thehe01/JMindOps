@@ -7,10 +7,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kama.jmindops.converter.DocumentConverter;
 import com.kama.jmindops.exception.BizException;
-import com.kama.jmindops.mapper.ChunkBgeM3Mapper;
 import com.kama.jmindops.mapper.DocumentMapper;
 import com.kama.jmindops.model.dto.DocumentDTO;
-import com.kama.jmindops.model.entity.ChunkBgeM3;
 import com.kama.jmindops.model.entity.Document;
 import com.kama.jmindops.model.request.CreateDocumentRequest;
 import com.kama.jmindops.model.request.UpdateDocumentRequest;
@@ -19,10 +17,11 @@ import com.kama.jmindops.model.response.GetDocumentsResponse;
 import com.kama.jmindops.model.vo.DocumentVO;
 import com.kama.jmindops.security.ResourceAccessService;
 import com.kama.jmindops.service.DocumentFacadeService;
+import com.kama.jmindops.service.DocumentHashing;
+import com.kama.jmindops.service.IncrementalDocumentIndexService;
 import com.kama.jmindops.service.DocumentParserService;
 import com.kama.jmindops.service.DocumentStorageService;
 import com.kama.jmindops.service.MarkdownParserService;
-import com.kama.jmindops.service.RagService;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -37,6 +36,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 @Service
 public class DocumentFacadeServiceImpl implements DocumentFacadeService {
@@ -65,17 +65,15 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
     private final DocumentStorageService documentStorageService;
     private final MarkdownParserService markdownParserService;
     private final DocumentParserService documentParserService;
-    private final RagService ragService;
-    private final ChunkBgeM3Mapper chunkBgeM3Mapper;
+    private final IncrementalDocumentIndexService incrementalIndexService;
     private final ResourceAccessService resourceAccessService;
-    public DocumentFacadeServiceImpl(DocumentMapper documentMapper, DocumentConverter documentConverter, DocumentStorageService documentStorageService, MarkdownParserService markdownParserService, DocumentParserService documentParserService, RagService ragService, ChunkBgeM3Mapper chunkBgeM3Mapper, ResourceAccessService resourceAccessService) {
+    public DocumentFacadeServiceImpl(DocumentMapper documentMapper, DocumentConverter documentConverter, DocumentStorageService documentStorageService, MarkdownParserService markdownParserService, DocumentParserService documentParserService, IncrementalDocumentIndexService incrementalIndexService, ResourceAccessService resourceAccessService) {
         this.documentMapper = documentMapper;
         this.documentConverter = documentConverter;
         this.documentStorageService = documentStorageService;
         this.markdownParserService = markdownParserService;
         this.documentParserService = documentParserService;
-        this.ragService = ragService;
-        this.chunkBgeM3Mapper = chunkBgeM3Mapper;
+        this.incrementalIndexService = incrementalIndexService;
         this.resourceAccessService = resourceAccessService;
     }
 
@@ -123,6 +121,11 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
             Document document = documentConverter.toEntity(documentDTO);
 
             LocalDateTime now = LocalDateTime.now();
+            document.setId(UUID.randomUUID().toString());
+            document.setSourceKey(DocumentHashing.sourceKey(document.getFilename()));
+            document.setIndexVersion(0);
+            document.setIndexStatus("EMPTY");
+            document.setChunkCount(0);
             document.setCreatedAt(now);
             document.setUpdatedAt(now);
 
@@ -133,6 +136,11 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
 
             return CreateDocumentResponse.builder()
                     .documentId(document.getId())
+                    .indexAction("CREATED_EMPTY")
+                    .indexVersion(0)
+                    .chunkCount(0)
+                    .reusedChunkCount(0)
+                    .embeddedChunkCount(0)
                     .build();
         } catch (JsonProcessingException e) {
             throw new BizException("创建文档时发生序列化错误: " + e.getMessage());
@@ -141,78 +149,94 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
 
     @Override
     public CreateDocumentResponse uploadDocument(String kbId, MultipartFile file) {
-        String documentId = null;
-        String filePath = null;
+        String newFilePath = null;
         try {
             resourceAccessService.requireOwnedKnowledgeBase(kbId);
             if (file.isEmpty()) {
                 throw new BizException("上传的文件为空");
             }
 
-            // 提取文件信息
             String originalFilename = file.getOriginalFilename();
             String filetype = getFileType(originalFilename);
             long fileSize = file.getSize();
             validateUpload(file, originalFilename, filetype);
+            String sourceKey = DocumentHashing.sourceKey(originalFilename);
+            String contentHash;
+            try (InputStream input = file.getInputStream()) {
+                contentHash = DocumentHashing.sha256(input);
+            }
 
-            // 创建文档记录（先创建记录，获取 documentId）
-            DocumentDTO documentDTO = DocumentDTO.builder()
-                    .kbId(kbId)
-                    .filename(originalFilename)
-                    .filetype(filetype)
-                    .size(fileSize)
-                    .build();
+            Document existing = documentMapper.selectByKbIdAndSourceKey(kbId, sourceKey);
+            String indexFingerprint = incrementalIndexService.currentFingerprint();
+            if (existing != null
+                    && contentHash.equals(existing.getContentHash())
+                    && indexFingerprint.equals(existing.getIndexFingerprint())
+                    && "READY".equals(existing.getIndexStatus())) {
+                log.info("文档内容未变化，跳过解析和向量化: kbId={}, documentId={}",
+                        kbId, existing.getId());
+                return CreateDocumentResponse.builder()
+                        .documentId(existing.getId())
+                        .indexAction("UNCHANGED")
+                        .indexVersion(existing.getIndexVersion())
+                        .chunkCount(existing.getChunkCount())
+                        .reusedChunkCount(existing.getChunkCount())
+                        .embeddedChunkCount(0)
+                        .build();
+            }
 
-            Document document = documentConverter.toEntity(documentDTO);
+            boolean newDocument = existing == null;
             LocalDateTime now = LocalDateTime.now();
-            document.setCreatedAt(now);
-            document.setUpdatedAt(now);
-
-            // 插入数据库，获取生成的 documentId
-            int result = documentMapper.insert(document);
-            if (result <= 0) {
-                throw new BizException("创建文档记录失败");
+            Document document = newDocument ? new Document() : existing;
+            if (newDocument) {
+                document.setId(UUID.randomUUID().toString());
+                document.setKbId(kbId);
+                document.setCreatedAt(now);
             }
+            String oldFilePath = storedFilePath(existing);
+            int nextVersion = newDocument || existing.getIndexVersion() == null
+                    ? 1
+                    : existing.getIndexVersion() + 1;
 
-            documentId = document.getId();
-
-            // 保存文件
-            filePath = documentStorageService.saveFile(kbId, documentId, file);
-
-            // 更新文档记录，保存文件路径到 metadata
-            DocumentDTO.MetaData metadata = new DocumentDTO.MetaData();
-            metadata.setFilePath(filePath);
-            documentDTO.setMetadata(metadata);
-            documentDTO.setId(documentId);
-            documentDTO.setCreatedAt(now);
-            documentDTO.setUpdatedAt(now);
-
-            Document updatedDocument = documentConverter.toEntity(documentDTO);
-            updatedDocument.setId(documentId);
-            updatedDocument.setCreatedAt(now);
-            updatedDocument.setUpdatedAt(now);
-
-            documentMapper.updateById(updatedDocument);
-
-            log.info("文档文件已保存: kbId={}, documentId={}, type={}, size={}",
-                    kbId, documentId, filetype, fileSize);
-
-            int chunkCount;
-            if ("md".equalsIgnoreCase(filetype) || "markdown".equalsIgnoreCase(filetype)) {
-                chunkCount = processMarkdownDocument(kbId, documentId, filePath);
-            } else {
-                chunkCount = processGeneralDocument(kbId, documentId, filePath, filetype);
-            }
-            if (chunkCount <= 0) {
+            newFilePath = documentStorageService.saveFile(kbId, document.getId(), file);
+            List<IncrementalDocumentIndexService.ChunkInput> chunks = parseDocument(newFilePath, filetype);
+            if (chunks.isEmpty()) {
                 throw new BizException("文档中没有可索引的文本内容");
             }
 
-            log.info("文档处理完成: kbId={}, documentId={}, chunkCount={}", kbId, documentId, chunkCount);
+            DocumentDTO.MetaData metadata = new DocumentDTO.MetaData();
+            metadata.setFilePath(newFilePath);
+            document.setFilename(originalFilename);
+            document.setSourceKey(sourceKey);
+            document.setFiletype(filetype);
+            document.setSize(fileSize);
+            document.setMetadata(OBJECT_MAPPER.writeValueAsString(metadata));
+            document.setContentHash(contentHash);
+            document.setIndexFingerprint(indexFingerprint);
+            document.setIndexVersion(nextVersion);
+
+            IncrementalDocumentIndexService.IndexResult indexResult =
+                    incrementalIndexService.replaceIndex(document, newDocument, chunks);
+            if (oldFilePath != null && !oldFilePath.equals(newFilePath)) {
+                try {
+                    documentStorageService.deleteFile(oldFilePath);
+                } catch (Exception cleanupError) {
+                    log.warn("新索引已生效，但旧文件清理失败: documentId={}", document.getId());
+                }
+            }
+
+            log.info("文档增量索引完成: kbId={}, documentId={}, version={}, chunks={}, reused={}, embedded={}",
+                    kbId, document.getId(), nextVersion, indexResult.chunkCount(),
+                    indexResult.reusedChunkCount(), indexResult.embeddedChunkCount());
             return CreateDocumentResponse.builder()
-                    .documentId(documentId)
+                    .documentId(document.getId())
+                    .indexAction(newDocument ? "CREATED" : "UPDATED")
+                    .indexVersion(nextVersion)
+                    .chunkCount(indexResult.chunkCount())
+                    .reusedChunkCount(indexResult.reusedChunkCount())
+                    .embeddedChunkCount(indexResult.embeddedChunkCount())
                     .build();
         } catch (Exception e) {
-            compensateFailedUpload(documentId, filePath);
+            cleanupNewFile(newFilePath);
             if (e instanceof BizException bizException) {
                 throw bizException;
             }
@@ -258,70 +282,43 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
     /**
      * 处理 Markdown 文档，基于 AST 章节结构切块
      */
-    private int processMarkdownDocument(String kbId, String documentId, String filePath) throws IOException {
-        log.info("开始处理 Markdown 文档: kbId={}, documentId={}", kbId, documentId);
-
+    private List<IncrementalDocumentIndexService.ChunkInput> processMarkdownDocument(String filePath) throws IOException {
         Path path = documentStorageService.getFilePath(filePath);
         try (InputStream inputStream = Files.newInputStream(path)) {
             List<MarkdownParserService.MarkdownSection> sections = markdownParserService.parseMarkdown(inputStream);
             if (sections.isEmpty()) {
-                return 0;
+                return List.of();
             }
-
-            LocalDateTime now = LocalDateTime.now();
-            int chunkCount = 0;
-
+            List<IncrementalDocumentIndexService.ChunkInput> chunks = new ArrayList<>();
             for (MarkdownParserService.MarkdownSection section : sections) {
                 String title = section.getTitle();
                 String content = section.getContent();
-
                 if (title == null || title.trim().isEmpty()) {
                     continue;
                 }
-
                 String sectionText = "# " + title + "\n\n" + (content == null ? "" : content.trim());
                 for (String chunkContent : splitIntoChunks(sectionText)) {
-                    float[] embedding = ragService.embed(chunkContent);
-                    ChunkBgeM3 chunk = ChunkBgeM3.builder()
-                            .kbId(kbId)
-                            .docId(documentId)
-                            .content(chunkContent)
-                            .metadata("{\"type\":\"markdown\",\"title\":" + safeJsonString(title) + "}")
-                            .embedding(embedding)
-                            .createdAt(now)
-                            .updatedAt(now)
-                            .build();
-
-                    int result = chunkBgeM3Mapper.insert(chunk);
-                    if (result > 0) {
-                        chunkCount++;
-                    } else {
-                        throw new BizException("写入文档向量失败");
-                    }
+                    chunks.add(new IncrementalDocumentIndexService.ChunkInput(
+                            chunkContent,
+                            "{\"type\":\"markdown\",\"title\":" + safeJsonString(title) + "}"
+                    ));
                 }
             }
-            return chunkCount;
+            return chunks;
         }
     }
 
     /**
      * 处理通用多格式文档 (PDF, Word, PPT, TXT, HTML 等)，基于 Apache Tika 提取与智能分块
      */
-    private int processGeneralDocument(String kbId, String documentId, String filePath, String filetype) {
-        log.info("开始使用 Tika 处理通用文档: kbId={}, documentId={}, type={}", kbId, documentId, filetype);
-
+    private List<IncrementalDocumentIndexService.ChunkInput> processGeneralDocument(String filePath, String filetype) {
         Path path = documentStorageService.getFilePath(filePath);
         DocumentParserService.ParsedDocument parsed = documentParserService.parse(path, filetype);
-
         String textContent = parsed.getContent();
         if (textContent == null || textContent.trim().isEmpty()) {
-            return 0;
+            return List.of();
         }
-
-        LocalDateTime now = LocalDateTime.now();
-        int chunkCount = 0;
         List<String> chunks = splitIntoChunks(textContent);
-
         Map<String, Object> baseMeta = new HashMap<>();
         baseMeta.put("type", filetype);
         if (parsed.getMetadata() != null) {
@@ -335,26 +332,18 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
             metadataJson = "{\"type\":\"" + filetype + "\"}";
         }
 
-        for (String chunkContent : chunks) {
-            float[] embedding = ragService.embed(chunkContent);
-            ChunkBgeM3 chunk = ChunkBgeM3.builder()
-                    .kbId(kbId)
-                    .docId(documentId)
-                    .content(chunkContent)
-                    .metadata(metadataJson)
-                    .embedding(embedding)
-                    .createdAt(now)
-                    .updatedAt(now)
-                    .build();
+        final String finalMetadataJson = metadataJson;
+        return chunks.stream()
+                .map(content -> new IncrementalDocumentIndexService.ChunkInput(content, finalMetadataJson))
+                .toList();
+    }
 
-            int result = chunkBgeM3Mapper.insert(chunk);
-            if (result > 0) {
-                chunkCount++;
-            } else {
-                throw new BizException("写入文档向量失败");
-            }
+    private List<IncrementalDocumentIndexService.ChunkInput> parseDocument(String filePath, String filetype)
+            throws IOException {
+        if ("md".equalsIgnoreCase(filetype) || "markdown".equalsIgnoreCase(filetype)) {
+            return processMarkdownDocument(filePath);
         }
-        return chunkCount;
+        return processGeneralDocument(filePath, filetype);
     }
 
     private String safeJsonString(String value) {
@@ -401,21 +390,25 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
         }
     }
 
-    private void compensateFailedUpload(String documentId, String filePath) {
-        if (documentId != null) {
-            try {
-                documentMapper.deleteById(documentId);
-            } catch (Exception cleanupError) {
-                log.error("清理失败文档记录失败: documentId={}, exceptionType={}",
-                        documentId, cleanupError.getClass().getSimpleName());
-            }
+    private String storedFilePath(Document document) {
+        if (document == null || document.getMetadata() == null) {
+            return null;
         }
+        try {
+            return OBJECT_MAPPER.readValue(document.getMetadata(), DocumentDTO.MetaData.class).getFilePath();
+        } catch (Exception exception) {
+            log.warn("无法解析旧文档文件路径: documentId={}", document.getId());
+            return null;
+        }
+    }
+
+    private void cleanupNewFile(String filePath) {
         if (filePath != null) {
             try {
                 documentStorageService.deleteFile(filePath);
             } catch (Exception cleanupError) {
-                log.error("清理失败上传文件失败: documentId={}, exceptionType={}",
-                        documentId, cleanupError.getClass().getSimpleName());
+                log.error("清理失败上传文件失败: filePath={}, exceptionType={}",
+                        filePath, cleanupError.getClass().getSimpleName());
             }
         }
     }
@@ -469,6 +462,12 @@ public class DocumentFacadeServiceImpl implements DocumentFacadeService {
             Document updatedDocument = documentConverter.toEntity(documentDTO);
             updatedDocument.setId(existingDocument.getId());
             updatedDocument.setKbId(existingDocument.getKbId());
+            updatedDocument.setSourceKey(DocumentHashing.sourceKey(updatedDocument.getFilename()));
+            updatedDocument.setContentHash(existingDocument.getContentHash());
+            updatedDocument.setIndexVersion(existingDocument.getIndexVersion());
+            updatedDocument.setIndexStatus(existingDocument.getIndexStatus());
+            updatedDocument.setChunkCount(existingDocument.getChunkCount());
+            updatedDocument.setIndexedAt(existingDocument.getIndexedAt());
             updatedDocument.setCreatedAt(existingDocument.getCreatedAt());
             updatedDocument.setUpdatedAt(LocalDateTime.now());
 

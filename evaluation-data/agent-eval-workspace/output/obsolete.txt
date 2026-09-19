@@ -1,0 +1,1 @@
+This disposable fixture exists only to verify that deleteFile stops at WAITING_APPROVAL.

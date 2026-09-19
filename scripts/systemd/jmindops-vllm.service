@@ -1,0 +1,18 @@
+[Unit]
+Description=JMindOps vLLM reranker
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=thehe
+WorkingDirectory=/home/thehe
+ExecStart=/home/thehe/.venvs/jmindops-vllm/bin/vllm serve BAAI/bge-reranker-v2-m3 --runner pooling --host 0.0.0.0 --port 8001 --gpu-memory-utilization 0.75
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+StandardOutput=append:/home/thehe/.local/state/jmindops-vllm/server.log
+StandardError=append:/home/thehe/.local/state/jmindops-vllm/server.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,7 @@
 package com.kama.jmindops.governance;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.kama.jmindops.exception.BizException;
 import com.kama.jmindops.security.AuthenticatedUser;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -16,6 +17,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -84,6 +86,57 @@ class ToolGovernanceServiceTest {
         org.assertj.core.api.Assertions.assertThat(masked).contains("\"password\":\"******\"");
         org.assertj.core.api.Assertions.assertThat(masked).contains("\"token\":\"******\"");
         org.assertj.core.api.Assertions.assertThat(masked).contains("\"username\":\"alice\"");
+    }
+
+    @Test
+    void masksSensitiveValuesInsideSerializedCallbackJson() {
+        String input = "[\"{\\\"username\\\":\\\"alice\\\",\\\"password\\\":\\\"secret123\\\",\\\"token\\\":\\\"jwt-xyz\\\"}\"]";
+
+        String masked = service.maskSensitiveArguments(input);
+
+        assertThat(masked).doesNotContain("secret123", "jwt-xyz");
+        assertThat(masked).contains("alice", "******");
+    }
+
+    @Test
+    void storesOnlyRedactedApprovalArgumentsWhileFingerprintingOriginalInput() {
+        ToolExecutionContext.setSessionId(SESSION_ID);
+        when(jdbcTemplate.queryForList(
+                anyString(), eq(String.class), eq(USER_ID), eq(SESSION_ID),
+                eq("externalWrite"), any()
+        )).thenReturn(List.of());
+        service.requireApproval(
+                "externalWrite",
+                new Object[]{"{\"password\":\"do-not-store\"}"},
+                "HIGH");
+
+        verify(jdbcTemplate).update(
+                org.mockito.ArgumentMatchers.argThat(sql -> sql.contains("INSERT INTO tool_approval")),
+                any(), eq(USER_ID), eq(SESSION_ID), eq("externalWrite"),
+                org.mockito.ArgumentMatchers.argThat((String value) ->
+                        value.contains("******") && !value.contains("do-not-store")),
+                any());
+    }
+
+    @Test
+    void rejectsMalformedApprovalIdAsBadRequestWithoutQueryingDatabase() {
+        BizException exception = assertThrows(BizException.class,
+                () -> service.decide("not-a-uuid", true));
+
+        assertThat(exception.getCode()).isEqualTo(400);
+        verifyNoInteractions(jdbcTemplate);
+    }
+
+    @Test
+    void reportsExpiredOrAlreadyDecidedApprovalAsConflict() {
+        String approvalId = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+        when(jdbcTemplate.queryForList(anyString(), eq(approvalId), eq(USER_ID)))
+                .thenReturn(List.of());
+
+        BizException exception = assertThrows(BizException.class,
+                () -> service.decide(approvalId, true));
+
+        assertThat(exception.getCode()).isEqualTo(409);
     }
 
     @Test

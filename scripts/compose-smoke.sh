@@ -123,17 +123,59 @@ printf 'Health endpoint: %s\n' "$health_body"
 
 migration_count="$("${compose[@]}" exec -T db \
   psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --tuples-only --no-align \
-  --command "SELECT count(*) FROM flyway_schema_history WHERE version IN ('1','2','3','4') AND success")"
-if [[ "$migration_count" != "4" ]]; then
-  printf 'Expected successful Flyway migrations V1-V4; got %s.\n' "$migration_count" >&2
+  --command "SELECT count(*) FROM flyway_schema_history WHERE version IN ('1','2','3','4','5','6','7') AND success")"
+if [[ "$migration_count" != "7" ]]; then
+  printf 'Expected successful Flyway migrations V1-V7; got %s.\n' "$migration_count" >&2
+  exit 1
+fi
+
+bm25_schema_status="$("${compose[@]}" exec -T db \
+  psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --tuples-only --no-align \
+  --command "SELECT (SELECT count(*) FROM pg_extension WHERE extname='pg_search')::text || '|' || (SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND indexname='idx_chunk_bm25' AND indexdef LIKE '%USING paradedb%' AND indexdef LIKE '%pdb.jieba%')::text")"
+if [[ "$bm25_schema_status" != "1|1" ]]; then
+  printf 'Expected pg_search and the Jieba BM25 index; got %s.\n' "$bm25_schema_status" >&2
+  exit 1
+fi
+
+"${compose[@]}" exec -T db \
+  psql --quiet --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+  --command "INSERT INTO knowledge_base (id, name) VALUES ('10000000-0000-0000-0000-000000000001', 'BM25 smoke');
+    INSERT INTO document (id, kb_id, filename, source_key, index_version, index_status, chunk_count)
+    VALUES
+      ('20000000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000001', 'vector.txt', 'vector.txt', 1, 'READY', 1),
+      ('20000000-0000-0000-0000-000000000002', '10000000-0000-0000-0000-000000000001', 'redis.txt', 'redis.txt', 1, 'READY', 1);
+    INSERT INTO chunk_bge_m3 (id, kb_id, doc_id, content, chunk_hash, chunk_index, embedding)
+    VALUES
+      ('30000000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000001', '20000000-0000-0000-0000-000000000001', 'PostgreSQL 使用 pgvector 执行向量检索，支持近邻搜索。', repeat('1', 64), 0, array_fill(0::real, ARRAY[1024])::vector),
+      ('30000000-0000-0000-0000-000000000002', '10000000-0000-0000-0000-000000000001', '20000000-0000-0000-0000-000000000002', 'Redis 提供缓存、会话和分布式锁。', repeat('2', 64), 0, array_fill(0::real, ARRAY[1024])::vector);" \
+  >/dev/null
+
+bm25_result="$("${compose[@]}" exec -T --env PGPASSWORD="$APP_DB_PASSWORD" db \
+  psql --host 127.0.0.1 --username jmindops_app --dbname "$POSTGRES_DB" \
+  --tuples-only --no-align \
+  --command "SELECT id FROM chunk_bge_m3
+    WHERE kb_id = '10000000-0000-0000-0000-000000000001'
+      AND content ||| 'PostgreSQL 如何进行向量检索'
+    ORDER BY pdb.score(id) DESC, id ASC
+    LIMIT 1")"
+if [[ "$bm25_result" != "30000000-0000-0000-0000-000000000001" ]]; then
+  printf 'Expected the Chinese BM25 query to retrieve the vector chunk; got %s.\n' "$bm25_result" >&2
+  exit 1
+fi
+
+incremental_index_column_count="$("${compose[@]}" exec -T db \
+  psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --tuples-only --no-align \
+  --command "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND ((table_name='document' AND column_name IN ('source_key','content_hash','index_version','index_status','chunk_count','indexed_at')) OR (table_name='chunk_bge_m3' AND column_name IN ('chunk_hash','chunk_index','document_version')))")"
+if [[ "$incremental_index_column_count" != "9" ]]; then
+  printf 'Expected 9 incremental-index columns; got %s.\n' "$incremental_index_column_count" >&2
   exit 1
 fi
 
 table_count="$("${compose[@]}" exec -T db \
   psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --tuples-only --no-align \
-  --command "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('agent','chat_session','chat_message','knowledge_base','document','chunk_bge_m3','app_user','tool_approval','tool_audit_log')")"
-if [[ "$table_count" != "9" ]]; then
-  printf 'Expected 9 application tables; got %s.\n' "$table_count" >&2
+  --command "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('agent','chat_session','chat_message','knowledge_base','document','chunk_bge_m3','app_user','tool_approval','tool_audit_log','generation_task')")"
+if [[ "$table_count" != "10" ]]; then
+  printf 'Expected 10 application tables; got %s.\n' "$table_count" >&2
   exit 1
 fi
 
@@ -148,8 +190,8 @@ fi
 runtime_acl="$("${compose[@]}" exec -T --env PGPASSWORD="$APP_DB_PASSWORD" db \
   psql --host 127.0.0.1 --username jmindops_app --dbname "$POSTGRES_DB" \
   --tuples-only --no-align --field-separator='|' \
-  --command "SELECT current_user, has_schema_privilege(current_user,'public','USAGE'), has_schema_privilege(current_user,'public','CREATE'), has_table_privilege(current_user,'public.agent','SELECT'), has_table_privilege(current_user,'public.agent','INSERT'), has_table_privilege(current_user,'public.agent','UPDATE'), has_table_privilege(current_user,'public.agent','DELETE')")"
-if [[ "$runtime_acl" != "jmindops_app|t|f|t|t|t|t" ]]; then
+  --command "SELECT current_user, has_schema_privilege(current_user,'public','USAGE'), has_schema_privilege(current_user,'public','CREATE'), has_table_privilege(current_user,'public.agent','SELECT'), has_table_privilege(current_user,'public.agent','INSERT'), has_table_privilege(current_user,'public.agent','UPDATE'), has_table_privilege(current_user,'public.agent','DELETE'), has_table_privilege(current_user,'public.generation_task','SELECT'), has_table_privilege(current_user,'public.generation_task','INSERT'), has_table_privilege(current_user,'public.generation_task','UPDATE')")"
+if [[ "$runtime_acl" != "jmindops_app|t|f|t|t|t|t|t|t|t" ]]; then
   printf 'Unexpected runtime database privileges: %s\n' "$runtime_acl" >&2
   exit 1
 fi
@@ -190,6 +232,6 @@ if [[ "$knowledge_status" != "200" ]]; then
   exit 1
 fi
 
-printf 'Flyway V1-V4, schema ownership, runtime ACLs, registration and header authentication: PASS\n'
+printf 'Flyway V1-V7, Jieba BM25 retrieval, incremental index schema, ownership, runtime ACLs, registration and header authentication: PASS\n'
 printf 'Query-string JWT rejection: PASS\n'
 printf 'Compose smoke test: PASS\n'

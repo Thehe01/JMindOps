@@ -265,7 +265,7 @@ CREATE INDEX IF NOT EXISTS idx_chunk_embedding
 
 ---
 
-## 5. 向量检索 Mapper 实现 (`ChunkBgeM3Mapper.xml`)
+## 5. 向量与 BM25 检索 Mapper 实现 (`ChunkBgeM3Mapper.xml`)
 
 ```xml
 <!-- 向量相似度检索：使用 pgvector 的 <-> 欧氏距离操作符排序 -->
@@ -277,12 +277,13 @@ CREATE INDEX IF NOT EXISTS idx_chunk_embedding
     LIMIT #{limit}
 </select>
 
-<!-- 关键词检索：ILIKE 模糊匹配 -->
-<select id="keywordSearch" resultMap="BaseResultMap">
+<!-- 中文关键词检索：pg_search 使用 Jieba 分词与 BM25 相关性排序 -->
+<select id="bm25Search" resultMap="BaseResultMap">
     SELECT id, kb_id, doc_id, content, metadata, embedding, created_at, updated_at
     FROM chunk_bge_m3
     WHERE kb_id = CAST(#{kbId} AS uuid)
-      AND content ILIKE CONCAT('%', #{keyword}, '%')
+      AND content ||| #{query}
+    ORDER BY pdb.score(id) DESC, id ASC
     LIMIT #{limit}
 </select>
 ```

@@ -10,6 +10,9 @@ import lombok.Data;
 @Data
 @Builder
 public class CreateChatMessageRequest {
+    @Size(max = 64, message = "requestId 长度不能超过 64")
+    private String requestId;
+
     @NotBlank(message = "agentId 不能为空")
     @Size(max = 64, message = "agentId 长度不能超过 64")
     private String agentId;
@@ -31,13 +34,16 @@ public class CreateChatMessageRequest {
     private ChatMessageDTO.MetaData metadata;
 
     public CreateChatMessageRequest() {}
-    public CreateChatMessageRequest(String agentId, String sessionId, ChatMessageDTO.RoleType role, String content, ChatMessageDTO.MetaData metadata) {
+    public CreateChatMessageRequest(String requestId, String agentId, String sessionId, ChatMessageDTO.RoleType role, String content, ChatMessageDTO.MetaData metadata) {
+        this.requestId = requestId;
         this.agentId = agentId;
         this.sessionId = sessionId;
         this.role = role;
         this.content = content;
         this.metadata = metadata;
     }
+    public String getRequestId() { return this.requestId; }
+    public void setRequestId(String requestId) { this.requestId = requestId; }
     public String getAgentId() { return this.agentId; }
     public void setAgentId(String agentId) { this.agentId = agentId; }
     public String getSessionId() { return this.sessionId; }
@@ -50,17 +56,19 @@ public class CreateChatMessageRequest {
     public void setMetadata(ChatMessageDTO.MetaData metadata) { this.metadata = metadata; }
     public static CreateChatMessageRequestBuilder builder() { return new CreateChatMessageRequestBuilder(); }
     public static class CreateChatMessageRequestBuilder {
+        private String requestId;
         private String agentId;
         private String sessionId;
         private ChatMessageDTO.RoleType role;
         private String content;
         private ChatMessageDTO.MetaData metadata;
         public CreateChatMessageRequestBuilder() {}
+        public CreateChatMessageRequestBuilder requestId(String requestId) { this.requestId = requestId; return this; }
         public CreateChatMessageRequestBuilder agentId(String agentId) { this.agentId = agentId; return this; }
         public CreateChatMessageRequestBuilder sessionId(String sessionId) { this.sessionId = sessionId; return this; }
         public CreateChatMessageRequestBuilder role(ChatMessageDTO.RoleType role) { this.role = role; return this; }
         public CreateChatMessageRequestBuilder content(String content) { this.content = content; return this; }
         public CreateChatMessageRequestBuilder metadata(ChatMessageDTO.MetaData metadata) { this.metadata = metadata; return this; }
-        public CreateChatMessageRequest build() { return new CreateChatMessageRequest(agentId, sessionId, role, content, metadata); }
+        public CreateChatMessageRequest build() { return new CreateChatMessageRequest(requestId, agentId, sessionId, role, content, metadata); }
     }
 }

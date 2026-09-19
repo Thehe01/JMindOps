@@ -1,6 +1,6 @@
-# 05 - 第 4 步：RAG 向量知识库与混合检索（AST 分块 + BGE-M3 + RRF 融合）
+# 05 - 第 4 步：RAG 向量知识库与混合检索（AST 分块 + BGE-M3 + BM25 + RRF）
 
-#JMindOps #RAG #Embedding #pgvector #RRF #HybridSearch
+#JMindOps #RAG #Embedding #pgvector #BM25 #RRF #HybridSearch
 
 > [!NOTE] 
 > 目标：构建工业级 RAG 检索系统。解决固定字数切片导致的 Markdown 表格截断问题，以及单一向量检索在精准专有名词、错误码匹配上的缺陷。
@@ -12,7 +12,7 @@
 | 检索模式 | 擅长场景 | 缺陷场景 |
 | :--- | :--- | :--- |
 | **纯向量检索** | 语义同义表达（“重置凭据” $\approx$ “修改密码”） | **精准专有名词/错误码**（如 `40102` 与 `40101` 在向量空间极度相似，容易排错） |
-| **纯关键词检索** | 精确型号、错误码、函数名匹配 | **同义不同字**（文档写“修改密码”，用户搜“重置凭据”，直接 0 命中） |
+| **BM25 倒排检索** | 精确型号、错误码、函数名及多词相关性排序 | **同义不同字**（文档写“修改密码”，用户搜“重置凭据”，仍可能不命中） |
 | **混合检索 + RRF** | **结合两者长处，既懂语义又死磕专有名词** | 需要设计排名融合算法 |
 
 ---
@@ -65,11 +65,11 @@ public List<RagSource> hybridSearchWithSources(String kbId, String query) {
     String queryEmbedding = toPgVector(doEmbed(query));
     List<ChunkBgeM3> vectorChunks = chunkBgeM3Mapper.similaritySearch(kbId, queryEmbedding, 3);
 
-    // 2. 关键词路 Top 5
-    List<ChunkBgeM3> keywordChunks = chunkBgeM3Mapper.keywordSearch(kbId, query, 5);
+    // 2. Jieba + BM25 倒排路 Top 5
+    List<ChunkBgeM3> bm25Chunks = chunkBgeM3Mapper.bm25Search(kbId, query, 5);
 
     // 3. RRF 倒数排名融合
-    List<String> orderedContents = reciprocalRankFusion(vectorChunks, keywordChunks);
+    List<String> orderedContents = reciprocalRankFusion(vectorChunks, bm25Chunks);
 
     // 4. 可选 Reranker 进一步精排...
     return orderedContents.stream()

@@ -2,6 +2,7 @@ package com.kama.jmindops.service.impl;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.kama.jmindops.converter.AgentConverter;
+import com.kama.jmindops.agent.ExternalToolRegistry;
 import com.kama.jmindops.agent.tools.Tool;
 import com.kama.jmindops.exception.BizException;
 import com.kama.jmindops.mapper.AgentMapper;
@@ -23,6 +24,7 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.HashSet;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -34,11 +36,19 @@ public class AgentFacadeServiceImpl implements AgentFacadeService {
     private final AgentConverter agentConverter;
     private final ResourceAccessService resourceAccessService;
     private final ToolFacadeService toolFacadeService;
-    public AgentFacadeServiceImpl(AgentMapper agentMapper, AgentConverter agentConverter, ResourceAccessService resourceAccessService, ToolFacadeService toolFacadeService) {
+    private final ExternalToolRegistry externalToolRegistry;
+    public AgentFacadeServiceImpl(
+            AgentMapper agentMapper,
+            AgentConverter agentConverter,
+            ResourceAccessService resourceAccessService,
+            ToolFacadeService toolFacadeService,
+            ExternalToolRegistry externalToolRegistry
+    ) {
         this.agentMapper = agentMapper;
         this.agentConverter = agentConverter;
         this.resourceAccessService = resourceAccessService;
         this.toolFacadeService = toolFacadeService;
+        this.externalToolRegistry = externalToolRegistry;
     }
 
 
@@ -150,7 +160,8 @@ public class AgentFacadeServiceImpl implements AgentFacadeService {
 
         Set<String> registeredOptionalTools = toolFacadeService.getOptionalTools().stream()
                 .map(Tool::getName)
-                .collect(Collectors.toSet());
+                .collect(Collectors.toCollection(HashSet::new));
+        registeredOptionalTools.addAll(externalToolRegistry.names());
         boolean admin = currentUserIsAdmin();
 
         for (String toolName : allowedToolNames) {

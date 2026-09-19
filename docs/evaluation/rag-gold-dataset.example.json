@@ -1,0 +1,337 @@
+{
+  "schemaVersion": "1.1",
+  "datasetId": "replace-with-stable-dataset-id",
+  "name": "JMindOps 核心架构与工程闭环 Gold v1 (35题)",
+  "description": "35 道 DRAFT 起始题，含 30 道可回答题与 5 道无答案题；必须按实际知识库逐题复核。",
+  "datasetRole": "development",
+  "frozen": false,
+  "annotationStatus": "DRAFT",
+  "review": {
+    "reviewedAt": null,
+    "sourceEvidence": {
+      "primaryDocuments": [
+        {"path": "README.md", "sha256": "REPLACE_AFTER_REVIEW"}
+      ],
+      "supportingDocuments": []
+    }
+  },
+  "kbId": "REPLACE_WITH_KNOWLEDGE_BASE_UUID",
+  "topK": 3,
+  "modes": [
+    "VECTOR",
+    "HYBRID_RRF"
+  ],
+  "answerEvaluationDefaults": {
+    "queryPrefix": "请仅根据我的知识库回答并给出来源：",
+    "expectedRoute": "RAG",
+    "requireKnowledgeTool": true,
+    "requireCitation": true,
+    "requireNoCitationForNoAnswer": true,
+    "minimumKeywordRecall": 0.67,
+    "refusalMustContainAny": [
+      "未找到",
+      "没有找到",
+      "知识库中没有",
+      "无法从知识库"
+    ]
+  },
+  "testCases": [
+    {
+      "id": "rag-answer-001",
+      "query": "requestId 和 generationId 分别解决什么问题？",
+      "expectedKeywords": [
+        "requestId",
+        "generationId"
+      ]
+    },
+    {
+      "id": "rag-answer-002",
+      "query": "同一个会话如何避免多个实例同时执行生成任务？",
+      "expectedKeywords": [
+        "Single-Flight",
+        "Redis Lua"
+      ]
+    },
+    {
+      "id": "rag-answer-003",
+      "query": "失败任务重试时为什么创建新的 generationId？",
+      "expectedKeywords": [
+        "parentGenerationId",
+        "重试"
+      ]
+    },
+    {
+      "id": "rag-answer-004",
+      "query": "重复提交完全相同的请求时服务端如何处理？",
+      "expectedKeywords": [
+        "幂等",
+        "指纹",
+        "chat_message"
+      ]
+    },
+    {
+      "id": "rag-answer-005",
+      "query": "同一用户复用相同 requestId 但传入不同内容时会报什么错误？",
+      "expectedKeywords": [
+        "409",
+        "指纹"
+      ]
+    },
+    {
+      "id": "rag-answer-006",
+      "query": "数据库层如何防止两个并发事务同时插入相同的 requestId？",
+      "expectedKeywords": [
+        "advisory lock",
+        "唯一约束"
+      ]
+    },
+    {
+      "id": "rag-answer-007",
+      "query": "一次生成任务有哪些持久化状态？",
+      "expectedKeywords": [
+        "PENDING",
+        "RUNNING",
+        "SUCCEEDED",
+        "FAILED"
+      ]
+    },
+    {
+      "id": "rag-answer-008",
+      "query": "为什么 ChatEvent 要在数据库事务提交后再处理？",
+      "expectedKeywords": [
+        "AFTER_COMMIT",
+        "事务"
+      ]
+    },
+    {
+      "id": "rag-answer-009",
+      "query": "事件消费者如何原子认领任务并迁移状态？",
+      "expectedKeywords": [
+        "Lua",
+        "claim",
+        "RUNNING"
+      ]
+    },
+    {
+      "id": "rag-answer-010",
+      "query": "长时间处于 PENDING 状态的任务如何被自动恢复？",
+      "expectedKeywords": [
+        "GenerationTaskRecovery",
+        "扫描",
+        "重新派发"
+      ]
+    },
+    {
+      "id": "rag-answer-011",
+      "query": "RUNNING 状态的任务出现心跳超时后如何处理？",
+      "expectedKeywords": [
+        "heartbeat",
+        "心跳",
+        "FAILED"
+      ]
+    },
+    {
+      "id": "rag-answer-012",
+      "query": "生成任务终态持久化时对异常信息有什么安全脱敏要求？",
+      "expectedKeywords": [
+        "脱敏",
+        "单行化",
+        "长度"
+      ]
+    },
+    {
+      "id": "rag-answer-013",
+      "query": "为什么关闭 Spring AI 内部默认的自动工具执行？",
+      "expectedKeywords": [
+        "显式驱动",
+        "think",
+        "execute"
+      ]
+    },
+    {
+      "id": "rag-answer-014",
+      "query": "系统如何从步数、超时和 Token 三个维度对 Agent 执行做硬限制？",
+      "expectedKeywords": [
+        "最大步数",
+        "超时",
+        "熔断"
+      ]
+    },
+    {
+      "id": "rag-answer-015",
+      "query": "RouterAgent 是如何对上下文进行改写并分类意图的？",
+      "expectedKeywords": [
+        "Query Rewrite",
+        "RouterAgent",
+        "意图"
+      ]
+    },
+    {
+      "id": "rag-answer-016",
+      "query": "RouterAgent 支持分类为哪些具体的意图类型？",
+      "expectedKeywords": [
+        "CHAT",
+        "WEATHER",
+        "RAG",
+        "MCP"
+      ]
+    },
+    {
+      "id": "rag-answer-017",
+      "query": "结构化输出本地解析失败后系统如何自愈修复？",
+      "expectedKeywords": [
+        "Repair Prompt",
+        "自愈",
+        "重试"
+      ]
+    },
+    {
+      "id": "rag-answer-018",
+      "query": "JMindOpsFactory 是如何实现无状态并按意图动态装配的？",
+      "expectedKeywords": [
+        "JMindOpsFactory",
+        "动态装配",
+        "白名单"
+      ]
+    },
+    {
+      "id": "rag-answer-019",
+      "query": "为什么检索层要采用向量与关键词混合检索？",
+      "expectedKeywords": [
+        "向量召回",
+        "关键词",
+        "互补"
+      ]
+    },
+    {
+      "id": "rag-answer-020",
+      "query": "向量召回和关键词召回如何通过 RRF 算法进行融合？",
+      "expectedKeywords": [
+        "RRF",
+        "融合",
+        "互惠排名"
+      ]
+    },
+    {
+      "id": "rag-answer-021",
+      "query": "当前关键词检索是不是 BM25？底层是如何实现的？",
+      "expectedKeywords": [
+        "pg_search",
+        "ParadeDB",
+        "BM25"
+      ]
+    },
+    {
+      "id": "rag-answer-022",
+      "query": "RAG 批量评测会输出哪些核心质量与延迟指标？",
+      "expectedKeywords": [
+        "HitRate@K",
+        "Recall@K",
+        "Precision@K",
+        "MRR",
+        "P95"
+      ]
+    },
+    {
+      "id": "rag-answer-023",
+      "query": "Reranker 未部署时，对照评测如何标记该模式？",
+      "expectedKeywords": [
+        "NOT_CONFIGURED",
+        "不冒充",
+        "未测试"
+      ]
+    },
+    {
+      "id": "rag-answer-024",
+      "query": "pgvector 在 PostgreSQL 中支持哪些向量索引类型？",
+      "expectedKeywords": [
+        "pgvector",
+        "HNSW",
+        "IVFFlat"
+      ]
+    },
+    {
+      "id": "rag-answer-025",
+      "query": "为什么使用 fetch 流式读取建立 SSE 而不是浏览器原生 EventSource？",
+      "expectedKeywords": [
+        "Authorization Header",
+        "JWT",
+        "fetch"
+      ]
+    },
+    {
+      "id": "rag-answer-026",
+      "query": "SSE 连接意外断开后前端如何与服务端完成历史对账？",
+      "expectedKeywords": [
+        "历史对账",
+        "generationId",
+        "持久化"
+      ]
+    },
+    {
+      "id": "rag-answer-027",
+      "query": "高风险工具如何防止重放执行与参数篡改？",
+      "expectedKeywords": [
+        "SHA-256",
+        "参数指纹",
+        "单次消费"
+      ]
+    },
+    {
+      "id": "rag-answer-028",
+      "query": "数据库查询工具是如何实现只读防护与安全隔离的？",
+      "expectedKeywords": [
+        "SELECT",
+        "安全表",
+        "敏感字段"
+      ]
+    },
+    {
+      "id": "rag-answer-029",
+      "query": "应用程序连接数据库的运行账号遵循了什么安全原则？",
+      "expectedKeywords": [
+        "jmindops_app",
+        "最小权限",
+        "DML"
+      ]
+    },
+    {
+      "id": "rag-answer-030",
+      "query": "系统使用了哪个工具管理数据库版本迁移，目前演进了多少个版本？",
+      "expectedKeywords": [
+        "Flyway",
+        "V1",
+        "V8"
+      ]
+    },
+    {
+      "id": "rag-no-answer-001",
+      "query": "知识库中记录的公司 2025 年第四季度销售额是多少？",
+      "expectedNoAnswer": true
+    },
+    {
+      "id": "rag-no-answer-002",
+      "query": "知识库中员工张三的入职日期是哪一天？",
+      "expectedNoAnswer": true
+    },
+    {
+      "id": "rag-no-answer-003",
+      "query": "知识库是否给出了生产数据库管理员的明文密码？",
+      "expectedNoAnswer": true,
+      "answerMustNotContain": [
+        "password=",
+        "密码是"
+      ]
+    },
+    {
+      "id": "rag-no-answer-004",
+      "query": "知识库中 Kafka 生产集群的 broker 地址是什么？",
+      "expectedNoAnswer": true
+    },
+    {
+      "id": "rag-no-answer-005",
+      "query": "知识库中 Kubernetes 生产集群的命名空间资源配额是多少？",
+      "expectedNoAnswer": true
+    }
+  ]
+}

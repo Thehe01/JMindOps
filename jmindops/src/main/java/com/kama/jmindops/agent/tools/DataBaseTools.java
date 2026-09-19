@@ -4,16 +4,22 @@ package com.kama.jmindops.agent.tools;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.kama.jmindops.governance.RequiresToolApproval;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @Component
@@ -31,14 +37,34 @@ public class DataBaseTools implements Tool {
             "(?i)\\b(insert|update|delete|merge|copy|alter|drop|create|grant|revoke|truncate|call|do|into|for\\s+update)\\b"
                     + "|(?i)\\b(pg_sleep|pg_read_file|pg_read_binary_file|pg_ls_dir|lo_import|lo_export|dblink|setval|nextval)\\s*\\(");
     private static final Pattern FORBIDDEN_TABLES = Pattern.compile(
-            "(?i)\\b(app_user|tool_approval|tool_audit_log|flyway_schema_history|pg_shadow|pg_authid|pg_user)\\b");
+            "(?i)\\b(app_user|tool_approval|tool_audit_log|generation_task|flyway_schema_history|pg_shadow|pg_authid|pg_user)\\b");
     private static final Pattern FORBIDDEN_COLUMNS = Pattern.compile(
             "(?i)\\b(password_hash|salt|secret|api_key)\\b");
+    private static final Pattern UNSAFE_IDENTIFIER_SYNTAX = Pattern.compile("(?i)U\\s*&\\s*\"|\"");
+    private static final Pattern RELATION_REFERENCE = Pattern.compile(
+            "(?i)\\b(?:from|join)\\s+(?:only\\s+)?([a-z_][a-z0-9_$]*(?:\\.[a-z_][a-z0-9_$]*)?)");
+    private static final Pattern RELATION_KEYWORD = Pattern.compile("(?i)\\b(from|join)\\b");
+    private static final String DEFAULT_ALLOWED_RELATIONS =
+            "agent,chat_session,chat_message,knowledge_base,document,chunk_bge_m3";
 
     private final JdbcTemplate jdbcTemplate;
+    private final Set<String> allowedRelations;
+
+    @Autowired
+    public DataBaseTools(
+            @Qualifier("databaseToolJdbcTemplate") JdbcTemplate jdbcTemplate,
+            @Value("${app.tools.database.allowed-relations:" + DEFAULT_ALLOWED_RELATIONS + "}")
+            String allowedRelations
+    ) {
+        this.jdbcTemplate = jdbcTemplate;
+        this.allowedRelations = parseAllowedRelations(allowedRelations);
+        if (this.allowedRelations.isEmpty()) {
+            throw new IllegalStateException("Database tool relation allowlist cannot be empty");
+        }
+    }
 
     public DataBaseTools(JdbcTemplate jdbcTemplate) {
-        this.jdbcTemplate = jdbcTemplate;
+        this(jdbcTemplate, DEFAULT_ALLOWED_RELATIONS);
     }
 
     @Override
@@ -64,7 +90,6 @@ public class DataBaseTools implements Tool {
      */
     @org.springframework.ai.tool.annotation.Tool(name = "databaseQuery", description = "用于在 PostgreSQL 中执行只读查询（SELECT）。接收由模型生成的查询语句，并返回结构化数据结果。该工具仅用于检索数据，严禁任何写入或修改数据库的语句。")
     @RequiresToolApproval
-    @Transactional(readOnly = true, timeout = 5)
     public String query(String sql) {
         try {
             String validationError = validateReadOnlySelect(sql);
@@ -197,6 +222,9 @@ public class DataBaseTools implements Tool {
                 || normalized.contains("*/")) {
             return "只允许一条不含注释的查询语句";
         }
+        if (UNSAFE_IDENTIFIER_SYNTAX.matcher(withoutTrailingSemicolon).find()) {
+            return "查询包含不受支持的标识符编码或引用方式";
+        }
         String uppercase = withoutTrailingSemicolon.stripLeading().toUpperCase(Locale.ROOT);
         if (!uppercase.startsWith("SELECT ") && !uppercase.startsWith("SELECT\n")
                 && !uppercase.startsWith("SELECT\t")) {
@@ -211,6 +239,46 @@ public class DataBaseTools implements Tool {
         if (FORBIDDEN_COLUMNS.matcher(withoutTrailingSemicolon).find()) {
             return "禁止查询包含敏感安全凭证的字段";
         }
+        String relationError = validateAllowedRelations(withoutTrailingSemicolon);
+        if (relationError != null) {
+            return relationError;
+        }
         return null;
+    }
+
+    private String validateAllowedRelations(String sql) {
+        String lowercase = sql.toLowerCase(Locale.ROOT);
+        int fromIndex = lowercase.indexOf("from");
+        if (fromIndex >= 0 && sql.substring(fromIndex).contains(",")) {
+            return "查询中的数据表必须使用显式 JOIN，且只能访问授权关系";
+        }
+        Matcher matcher = RELATION_REFERENCE.matcher(sql);
+        int references = 0;
+        while (matcher.find()) {
+            references++;
+            String relation = canonicalRelation(matcher.group(1));
+            if (!allowedRelations.contains(relation)) {
+                return "查询访问了未授权的数据表或视图: " + relation;
+            }
+        }
+        if (RELATION_KEYWORD.matcher(sql).find() && references == 0) {
+            return "无法安全识别查询中的数据表或视图";
+        }
+        return null;
+    }
+
+    private static Set<String> parseAllowedRelations(String value) {
+        if (value == null || value.isBlank()) {
+            return Set.of();
+        }
+        return Arrays.stream(value.split(","))
+                .map(DataBaseTools::canonicalRelation)
+                .filter(relation -> !relation.isBlank())
+                .collect(Collectors.toUnmodifiableSet());
+    }
+
+    private static String canonicalRelation(String relation) {
+        String normalized = relation == null ? "" : relation.trim().toLowerCase(Locale.ROOT);
+        return normalized.startsWith("public.") ? normalized.substring("public.".length()) : normalized;
     }
 }

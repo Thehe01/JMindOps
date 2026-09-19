@@ -9,32 +9,50 @@
         <result property="kbId" column="kb_id" jdbcType="VARCHAR"/>
         <result property="docId" column="doc_id" jdbcType="VARCHAR"/>
         <result property="content" column="content" jdbcType="VARCHAR"/>
+        <result property="chunkHash" column="chunk_hash" jdbcType="VARCHAR"/>
+        <result property="indexFingerprint" column="index_fingerprint" jdbcType="VARCHAR"/>
+        <result property="chunkIndex" column="chunk_index" jdbcType="INTEGER"/>
+        <result property="documentVersion" column="document_version" jdbcType="INTEGER"/>
         <result property="metadata" column="metadata" jdbcType="VARCHAR"/>
         <result property="embedding" column="embedding" jdbcType="OTHER"/>
         <result property="createdAt" column="created_at" jdbcType="TIMESTAMP"/>
         <result property="updatedAt" column="updated_at" jdbcType="TIMESTAMP"/>
     </resultMap>
 
+    <resultMap id="SearchResultMap" type="com.kama.jmindops.model.entity.ChunkBgeM3" extends="BaseResultMap">
+        <result property="sourceKey" column="source_key" jdbcType="VARCHAR"/>
+    </resultMap>
+
     <sql id="Base_Column_List">
         id,kb_id,doc_id,
-        content,metadata,embedding,
+        content,chunk_hash,index_fingerprint,chunk_index,document_version,metadata::text AS metadata,embedding,
         created_at,updated_at
     </sql>
 
     <insert id="insert" parameterType="com.kama.jmindops.model.entity.ChunkBgeM3"
             keyColumn="id" keyProperty="id" useGeneratedKeys="true">
         INSERT INTO chunk_bge_m3
-        (kb_id,
+        (id,
+         kb_id,
          doc_id,
          content,
+         chunk_hash,
+         index_fingerprint,
+         chunk_index,
+         document_version,
          metadata,
          embedding,
          created_at,
          updated_at)
-        VALUES (CAST(#{kbId} AS uuid),
+        VALUES (COALESCE(CAST(#{id} AS uuid), gen_random_uuid()),
+                CAST(#{kbId} AS uuid),
                 CAST(#{docId} AS uuid),
                 #{content},
-                #{metadata},
+                #{chunkHash},
+                #{indexFingerprint},
+                #{chunkIndex},
+                #{documentVersion},
+                CAST(#{metadata} AS jsonb),
                 #{embedding}::vector,
                 #{createdAt},
                 #{updatedAt})
@@ -45,7 +63,11 @@
                kb_id,
                doc_id,
                content,
-               metadata,
+               chunk_hash,
+               index_fingerprint,
+               chunk_index,
+               document_version,
+               metadata::text AS metadata,
                embedding,
                created_at,
                updated_at
@@ -59,6 +81,18 @@
         WHERE id = CAST(#{id} AS uuid)
     </delete>
 
+    <delete id="deleteByDocumentId">
+        DELETE FROM chunk_bge_m3
+        WHERE doc_id = CAST(#{documentId} AS uuid)
+    </delete>
+
+    <select id="selectByDocumentId" resultMap="BaseResultMap">
+        SELECT <include refid="Base_Column_List"/>
+        FROM chunk_bge_m3
+        WHERE doc_id = CAST(#{documentId} AS uuid)
+        ORDER BY chunk_index ASC
+    </select>
+
     <update id="updateById" parameterType="com.kama.jmindops.model.entity.ChunkBgeM3">
         UPDATE chunk_bge_m3
         <set>
@@ -71,8 +105,20 @@
             <if test="content != null">
                 content = #{content},
             </if>
+            <if test="chunkHash != null">
+                chunk_hash = #{chunkHash},
+            </if>
+            <if test="indexFingerprint != null">
+                index_fingerprint = #{indexFingerprint},
+            </if>
+            <if test="chunkIndex != null">
+                chunk_index = #{chunkIndex},
+            </if>
+            <if test="documentVersion != null">
+                document_version = #{documentVersion},
+            </if>
             <if test="metadata != null">
-                metadata = #{metadata},
+                metadata = CAST(#{metadata} AS jsonb),
             </if>
             <if test="embedding != null">
                 embedding = #{embedding}::vector,
@@ -82,44 +128,51 @@
         WHERE id = CAST(#{id} AS uuid)
     </update>
 
-    <select id="similaritySearch" resultMap="BaseResultMap">
+    <select id="similaritySearch" resultMap="SearchResultMap">
         <![CDATA[
-        SELECT id,
-               kb_id,
-               doc_id,
-               content,
-               metadata,
-               embedding,
-               created_at,
-               updated_at
-        FROM chunk_bge_m3
-        WHERE kb_id = CAST(#{kbId} AS uuid)
-        ORDER BY embedding <-> #{vectorLiteral}::vector
+        SELECT c.id,
+               c.kb_id,
+               c.doc_id,
+               d.source_key,
+               c.content,
+               c.chunk_hash,
+               c.index_fingerprint,
+               c.chunk_index,
+               c.document_version,
+               c.metadata::text AS metadata,
+               c.embedding,
+               c.created_at,
+               c.updated_at
+        FROM chunk_bge_m3 c
+        JOIN document d ON d.id = c.doc_id
+        WHERE c.kb_id = CAST(#{kbId} AS uuid)
+          AND c.index_fingerprint = #{indexFingerprint}
+        ORDER BY c.embedding <-> #{vectorLiteral}::vector
         LIMIT #{limit}
         ]]>
     </select>
 
-    <select id="keywordSearch" resultMap="BaseResultMap">
+    <select id="bm25Search" resultMap="SearchResultMap">
         <![CDATA[
-        SELECT id,
-               kb_id,
-               doc_id,
-               content,
-               metadata,
-               embedding,
-               created_at,
-               updated_at
-        FROM chunk_bge_m3
-        WHERE kb_id = CAST(#{kbId} AS uuid)
-          AND STRPOS(LOWER(content), LOWER(#{keyword})) > 0
-        ORDER BY CASE
-                     WHEN LOWER(content) = LOWER(#{keyword}) THEN 0
-                     WHEN STRPOS(LOWER(content), LOWER(#{keyword})) = 1 THEN 1
-                     ELSE 2
-                 END,
-                 STRPOS(LOWER(content), LOWER(#{keyword})) ASC,
-                 CHAR_LENGTH(content) ASC,
-                 id ASC
+        SELECT c.id,
+               c.kb_id,
+               c.doc_id,
+               d.source_key,
+               c.content,
+               c.chunk_hash,
+               c.index_fingerprint,
+               c.chunk_index,
+               c.document_version,
+               c.metadata::text AS metadata,
+               c.embedding,
+               c.created_at,
+               c.updated_at
+        FROM chunk_bge_m3 c
+        JOIN document d ON d.id = c.doc_id
+        WHERE c.kb_id = CAST(#{kbId} AS uuid)
+          AND c.index_fingerprint = #{indexFingerprint}
+          AND c.content ||| #{query}
+        ORDER BY pdb.score(c.id) DESC, c.id ASC
         LIMIT #{limit}
         ]]>
     </select>

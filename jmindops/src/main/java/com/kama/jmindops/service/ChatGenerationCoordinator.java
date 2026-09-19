@@ -62,6 +62,20 @@ public class ChatGenerationCoordinator {
             end
             """;
 
+    // 仅当锁不存在或仍属于同一个 PENDING 任务时恢复预占；RUNNING 与其他任务一律拒绝。
+    private static final String RESTORE_LUA_SCRIPT = """
+            local current = redis.call('get', KEYS[1])
+            if not current then
+                redis.call('set', KEYS[1], ARGV[1], 'EX', ARGV[2])
+                return 1
+            elseif current == ARGV[1] then
+                redis.call('expire', KEYS[1], ARGV[2])
+                return 1
+            else
+                return 0
+            end
+            """;
+
     private final StringRedisTemplate redisTemplate;
     // 用于内存降级，以及看门狗追踪当前实例持有的 active generation
     private final ConcurrentMap<String, String> memoryGenerations = new ConcurrentHashMap<>();
@@ -162,6 +176,46 @@ public class ChatGenerationCoordinator {
         }
 
         return memoryGenerations.replace(sessionId, expectedReserved, newRunning);
+    }
+
+    /**
+     * 为数据库中待恢复的 PENDING 任务重建会话预占。该操作不会抢占正在运行的任务。
+     */
+    public boolean restoreReservation(String sessionId, String generationId) {
+        String expectedReserved = RESERVED + generationId;
+        if (redisTemplate != null) {
+            try {
+                DefaultRedisScript<Long> script = new DefaultRedisScript<>(RESTORE_LUA_SCRIPT, Long.class);
+                Long result = redisTemplate.execute(
+                        script,
+                        Collections.singletonList(buildKey(sessionId)),
+                        expectedReserved,
+                        String.valueOf(DEFAULT_TTL.toSeconds())
+                );
+                return result != null && result == 1L;
+            } catch (Exception e) {
+                log.error("[ChatGenerationCoordinator] Redis restore error, fail-closed: {}", e.getMessage());
+                throw new BizException(500, "分布式协调服务异常，为保证一致性已拒绝任务恢复");
+            }
+        }
+
+        String current = memoryGenerations.putIfAbsent(sessionId, expectedReserved);
+        return current == null || expectedReserved.equals(current);
+    }
+
+    /**
+     * Returns only generations currently owned as RUNNING by this application instance.
+     * The persistent task heartbeat uses this snapshot to distinguish a slow model call
+     * from a process that has stopped renewing both Redis and database leases.
+     */
+    public Map<String, String> runningGenerationsSnapshot() {
+        Map<String, String> running = new java.util.HashMap<>();
+        memoryGenerations.forEach((sessionId, value) -> {
+            if (value != null && value.startsWith(RUNNING)) {
+                running.put(sessionId, value.substring(RUNNING.length()));
+            }
+        });
+        return Map.copyOf(running);
     }
 
     public void release(String sessionId, String generationId) {

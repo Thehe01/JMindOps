@@ -250,6 +250,10 @@ const AddAgentModal: React.FC<AddAgentModalProps> = ({
                         value: "gemini-2.5",
                         label: "gemini-2.5",
                       },
+                      {
+                        value: "ollama-qwen2.5",
+                        label: "Ollama / qwen2.5（本地）",
+                      },
                     ]}
                     placeholder="请选择模型"
                     style={{ width: "300px" }}

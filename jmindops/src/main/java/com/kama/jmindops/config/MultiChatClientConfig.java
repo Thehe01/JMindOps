@@ -5,7 +5,9 @@ import org.springframework.ai.deepseek.DeepSeekChatModel;
 import org.springframework.ai.google.genai.GoogleGenAiChatModel;
 import org.springframework.ai.model.deepseek.autoconfigure.DeepSeekChatAutoConfiguration;
 import org.springframework.ai.model.google.genai.autoconfigure.chat.GoogleGenAiChatAutoConfiguration;
+import org.springframework.ai.model.ollama.autoconfigure.OllamaChatAutoConfiguration;
 import org.springframework.ai.model.zhipuai.autoconfigure.ZhiPuAiChatAutoConfiguration;
+import org.springframework.ai.ollama.OllamaChatModel;
 import org.springframework.ai.zhipuai.ZhiPuAiChatModel;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Condition;
@@ -53,6 +55,17 @@ public class MultiChatClientConfig {
         }
     }
 
+    @Configuration(proxyBeanMethods = false)
+    @Conditional(OllamaConfiguredCondition.class)
+    @Import(OllamaChatAutoConfiguration.class)
+    static class OllamaConfiguration {
+        @Bean("ollama-qwen2.5")
+        @ConditionalOnMissingBean(name = "ollama-qwen2.5")
+        ChatClient ollamaChatClient(OllamaChatModel ollamaChatModel) {
+            return ChatClient.create(ollamaChatModel);
+        }
+    }
+
     private abstract static class ProviderConfiguredCondition implements Condition {
         private final String provider;
         private final String apiKeyProperty;
@@ -69,7 +82,17 @@ public class MultiChatClientConfig {
                 return false;
             }
             String selectedProvider = context.getEnvironment().getProperty("spring.ai.model.chat");
-            return !StringUtils.hasText(selectedProvider) || provider.equalsIgnoreCase(selectedProvider);
+            return !StringUtils.hasText(selectedProvider)
+                    || "none".equalsIgnoreCase(selectedProvider)
+                    || provider.equalsIgnoreCase(selectedProvider);
+        }
+    }
+
+    public static final class OllamaConfiguredCondition implements Condition {
+        @Override
+        public boolean matches(ConditionContext context, AnnotatedTypeMetadata metadata) {
+            String selectedProvider = context.getEnvironment().getProperty("spring.ai.model.chat");
+            return "ollama".equalsIgnoreCase(selectedProvider);
         }
     }
 

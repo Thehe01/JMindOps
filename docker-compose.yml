@@ -1,11 +1,15 @@
 services:
   db:
-    image: pgvector/pgvector:pg15
+    # Keep PostgreSQL 15 for data-volume compatibility while adding pg_search's
+    # native BM25 index. ParadeDB also bundles pgvector.
+    image: paradedb/paradedb:0.25.6-pg15
+    command: ["postgres", "-c", "shared_preload_libraries=pg_search"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-jmindops_owner}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-jmindops}
       APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in .env}
+      DB_TOOL_PASSWORD: ${DB_TOOL_PASSWORD:-}
     expose:
       - "5432"
     volumes:
@@ -36,6 +40,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-jmindops}
       APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in .env}
+      DB_TOOL_PASSWORD: ${DB_TOOL_PASSWORD:-}
     entrypoint: ["/bin/sh", "/opt/jmindops/000_create_application_user.sh"]
     volumes:
       - ./sql/init/000_create_application_user.sh:/opt/jmindops/000_create_application_user.sh:ro
@@ -70,6 +75,66 @@ services:
       - data
     restart: unless-stopped
 
+  # Optional cross-encoder reranker. It is only created with `--profile rerank`;
+  # the default stack keeps using deterministic RRF without downloading a model.
+  reranker:
+    profiles: ["rerank"]
+    image: ${RERANKER_VLLM_IMAGE:-vllm/vllm-openai:latest}
+    command:
+      - --model
+      - ${RAG_RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
+      - --max-model-len
+      - ${RAG_RERANKER_MAX_MODEL_LEN:-4096}
+    gpus: all
+    shm_size: "1gb"
+    ports:
+      - "127.0.0.1:${RAG_RERANKER_PORT:-8001}:8000"
+    volumes:
+      - reranker_model_cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 30
+      start_period: 180s
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - edge
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+  # CPU-only fallback for WSL/Docker installations without a working NVIDIA
+  # container runtime. The application selects it with provider=tei.
+  reranker-tei:
+    profiles: ["rerank-cpu"]
+    image: ${RERANKER_TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.9}
+    command:
+      - --model-id
+      - ${RAG_RERANKER_TEI_MODEL:-BAAI/bge-reranker-base}
+      - --dtype
+      - float32
+    ports:
+      - "127.0.0.1:${RAG_RERANKER_PORT:-8001}:80"
+    volumes:
+      - reranker_tei_cache:/data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 300s
+    networks:
+      - edge
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
   jmindops:
     build:
       context: ./jmindops
@@ -92,13 +157,39 @@ services:
       GOOGLE_GENAI_API_KEY: ${GOOGLE_GENAI_API_KEY:-}
       MAIL_USERNAME: ${MAIL_USERNAME:-}
       MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      EMAIL_TOOL_ENABLED: ${EMAIL_TOOL_ENABLED:-false}
+      DATABASE_TOOL_ENABLED: ${DATABASE_TOOL_ENABLED:-false}
+      DATABASE_TOOL_JDBC_URL: jdbc:postgresql://db:5432/${POSTGRES_DB:-jmindops}
+      DATABASE_TOOL_USERNAME: jmindops_tool_reader
+      DATABASE_TOOL_PASSWORD: ${DB_TOOL_PASSWORD:-}
+      DATABASE_TOOL_ALLOWED_RELATIONS: ${DATABASE_TOOL_ALLOWED_RELATIONS:-agent,chat_session,chat_message,knowledge_base,document,chunk_bge_m3}
+      FILESYSTEM_TOOL_ENABLED: ${FILESYSTEM_TOOL_ENABLED:-false}
+      FILESYSTEM_TOOL_BASE_PATH: /app/data/mcp-workspace
       MCP_CLIENT_ENABLED: ${MCP_CLIENT_ENABLED:-false}
       DOCUMENT_STORAGE_BASE_PATH: /app/data/documents
       RAG_EMBEDDING_BASE_URL: ${RAG_EMBEDDING_BASE_URL:-http://host.docker.internal:11434}
-      RAG_RERANKER_ENABLED: ${RAG_RERANKER_ENABLED:-false}
+      RAG_EMBEDDING_MODEL: ${RAG_EMBEDDING_MODEL:-bge-m3}
+      RAG_INDEX_PIPELINE_VERSION: ${RAG_INDEX_PIPELINE_VERSION:-tika-flexmark-chunk-v1}
+      RAG_EMBEDDING_DIMENSIONS: ${RAG_EMBEDDING_DIMENSIONS:-1024}
+      RAG_EMBEDDING_NORMALIZATION: ${RAG_EMBEDDING_NORMALIZATION:-none}
+      RAG_ANSWER_TOP_K: ${RAG_ANSWER_TOP_K:-5}
+      RAG_CANDIDATE_TOP_K: ${RAG_CANDIDATE_TOP_K:-20}
+      RAG_EVIDENCE_GATE_ENABLED: ${RAG_EVIDENCE_GATE_ENABLED:-true}
+      RAG_MINIMUM_RERANK_SCORE: ${RAG_MINIMUM_RERANK_SCORE:-0.05}
+      RAG_RERANKER_PROVIDER: ${RAG_RERANKER_PROVIDER:-none}
+      RAG_RERANKER_BASE_URL: ${RAG_RERANKER_BASE_URL:-http://reranker:8000}
+      RAG_RERANKER_ENDPOINT: ${RAG_RERANKER_ENDPOINT:-/v1/rerank}
+      RAG_RERANKER_TEI_ENDPOINT: ${RAG_RERANKER_TEI_ENDPOINT:-/rerank}
+      RAG_RERANKER_MODEL: ${RAG_RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
+      RAG_RERANKER_TIMEOUT_SECONDS: ${RAG_RERANKER_TIMEOUT_SECONDS:-30}
       APP_JWT_SECRET: ${APP_JWT_SECRET:?Set APP_JWT_SECRET in .env}
       APP_BOOTSTRAP_ADMIN_USERNAME: ${APP_BOOTSTRAP_ADMIN_USERNAME:-}
       APP_BOOTSTRAP_ADMIN_PASSWORD: ${APP_BOOTSTRAP_ADMIN_PASSWORD:-}
+      GENERATION_PENDING_REDISPATCH_AFTER_SECONDS: ${GENERATION_PENDING_REDISPATCH_AFTER_SECONDS:-15}
+      GENERATION_RUNNING_TIMEOUT_SECONDS: ${GENERATION_RUNNING_TIMEOUT_SECONDS:-600}
+      GENERATION_RECOVERY_BATCH_SIZE: ${GENERATION_RECOVERY_BATCH_SIZE:-20}
+      GENERATION_RECOVERY_INITIAL_DELAY_MS: ${GENERATION_RECOVERY_INITIAL_DELAY_MS:-15000}
+      GENERATION_RECOVERY_FIXED_DELAY_MS: ${GENERATION_RECOVERY_FIXED_DELAY_MS:-15000}
     depends_on:
       db-role-init:
         condition: service_completed_successfully
@@ -106,6 +197,7 @@ services:
         condition: service_healthy
     volumes:
       - documents_data:/app/data
+      - agent_workspace_data:/app/data/mcp-workspace
     read_only: true
     tmpfs:
       - /tmp/jmindops:rw,noexec,nosuid,size=64m,uid=10001,gid=10001,mode=0700
@@ -152,7 +244,10 @@ services:
 volumes:
   postgres_data:
   documents_data:
+  agent_workspace_data:
   redis_data:
+  reranker_model_cache:
+  reranker_tei_cache:
 
 networks:
   data:

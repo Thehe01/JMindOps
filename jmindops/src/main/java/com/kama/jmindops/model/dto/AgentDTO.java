@@ -89,7 +89,8 @@ public class AgentDTO {
     public enum ModelType {
         DEEPSEEK_CHAT("deepseek-chat"),
         GLM_4_6("glm-4.6"),
-        GEMINI_2_5("gemini-2.5");
+        GEMINI_2_5("gemini-2.5"),
+        OLLAMA_QWEN_2_5("ollama-qwen2.5");
 
         @JsonValue
         private final String modelName;

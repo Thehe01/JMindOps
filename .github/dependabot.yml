@@ -1,7 +1,7 @@
 version: 2
 updates:
   - package-ecosystem: maven
-    directory: /jchatmind
+    directory: /jmindops
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
@@ -19,7 +19,7 @@ updates:
     open-pull-requests-limit: 5
 
   - package-ecosystem: docker
-    directory: /jchatmind
+    directory: /jmindops
     schedule:
       interval: weekly
 

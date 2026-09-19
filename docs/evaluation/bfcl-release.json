@@ -1,0 +1,12 @@
+{
+  "distribution": "bfcl-eval",
+  "version": "2026.3.23",
+  "benchmarkVersion": "BFCL V4",
+  "pythonRequires": ">=3.10",
+  "sourceRepository": "https://github.com/ShishirPatil/gorilla",
+  "sourceCommit": "6ea57973c7a6097fd7c5915698c54c17c5b1b6c8",
+  "wheelFilename": "bfcl_eval-2026.3.23-py3-none-any.whl",
+  "wheelSha256": "3bb6dfa5f0c68ad403c9ec50b00db2bb3b4cc9b38ab1ff33f48fe30d853d3a0a",
+  "license": "Apache-2.0",
+  "verifiedAt": "2026-09-08"
+}
