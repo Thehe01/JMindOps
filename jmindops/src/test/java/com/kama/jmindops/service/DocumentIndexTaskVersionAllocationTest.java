@@ -1,5 +1,6 @@
 package com.kama.jmindops.service;
 
+import com.kama.jmindops.mapper.ChunkBgeM3Mapper;
 import com.kama.jmindops.mapper.DocumentMapper;
 import com.kama.jmindops.model.entity.Document;
 import com.kama.jmindops.model.entity.DocumentIndexTask;
@@ -7,14 +8,20 @@ import com.kama.jmindops.model.entity.DocumentIndexTaskStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -104,6 +111,7 @@ public class DocumentIndexTaskVersionAllocationTest {
         assertEquals("doc-A", result.documentId());
         assertEquals(2, result.version());
         assertNotNull(result.task());
+        assertTrue(result.task().isNewDocument());
     }
 
     @Test
@@ -125,5 +133,102 @@ public class DocumentIndexTaskVersionAllocationTest {
         assertEquals(3, result.version());
         assertNotEquals("UNCHANGED", result.action());
         assertNotNull(result.task());
+        assertTrue(result.task().isNewDocument());
+    }
+
+    @Test
+    void failedInitialVersionNextVersionCommitsAsNewDocument() throws Exception {
+        String kbId = "kb-regression";
+        String sourceKey = "guide.txt";
+        String docId = "doc-reg-1";
+
+        // 1. v1 FAILED, document row absent in document table
+        when(documentMapper.selectByKbIdAndSourceKey(kbId, sourceKey)).thenReturn(null);
+        when(documentMapper.selectById(docId)).thenReturn(null);
+
+        DocumentIndexTask v1Task = DocumentIndexTask.builder()
+                .id("task-v1")
+                .kbId(kbId)
+                .documentId(docId)
+                .indexVersion(1)
+                .status(DocumentIndexTaskStatus.FAILED)
+                .filePath("docs/v1.txt")
+                .filename("guide.txt")
+                .sourceKey(sourceKey)
+                .build();
+
+        when(taskStore.findLatestByKbIdAndSourceKey(kbId, sourceKey)).thenReturn(Optional.of(v1Task));
+        when(taskStore.findLatestActiveByKbIdAndSourceKey(kbId, sourceKey)).thenReturn(Optional.empty());
+
+        // 2. enqueue v2
+        var result = enqueueService.enqueue(
+                kbId, "guide.txt", "txt", 100L, "docs/v2.txt", "hash-v2", sourceKey, "fp-1", 3, null);
+
+        // Verification: same documentId, version=2, isNewDocument=true
+        assertEquals(docId, result.documentId());
+        assertEquals(2, result.version());
+        assertNotNull(result.task());
+        assertTrue(result.task().isNewDocument());
+
+        // 3. execution and final commit
+        DocumentIndexTask v2Task = result.task();
+        v2Task.setStatus(DocumentIndexTaskStatus.RUNNING);
+        v2Task.setWorkerId("worker-test");
+        v2Task.setLeaseVersion(1L);
+
+        Path tempFile = Files.createTempFile("test-v2", ".txt");
+        try {
+            Files.writeString(tempFile, "guide content");
+            when(storageService.getFilePath("docs/v2.txt")).thenReturn(tempFile);
+
+            MarkdownParserService markdownParserService = mock(MarkdownParserService.class);
+            DocumentParserService documentParserService = mock(DocumentParserService.class);
+            when(documentParserService.parse(any(), eq("txt"))).thenReturn(
+                    DocumentParserService.ParsedDocument.builder()
+                            .content("guide content")
+                            .fileType("txt")
+                            .build());
+
+            IncrementalDocumentIndexService incrementalIndexService = mock(IncrementalDocumentIndexService.class);
+            when(incrementalIndexService.prepareIndex(any(Document.class), eq(true), eq(0), any()))
+                    .thenAnswer(invocation -> {
+                        Document doc = invocation.getArgument(0);
+                        doc.setIndexStatus("READY");
+                        return new IncrementalDocumentIndexService.PreparedIndex(
+                                doc, true, 0, List.of(),
+                                new IncrementalDocumentIndexService.IndexResult(1, 0, 1));
+                    });
+
+            ChunkBgeM3Mapper chunkMapper = mock(ChunkBgeM3Mapper.class);
+            DocumentIndexStore indexStore = new DocumentIndexStore(documentMapper, chunkMapper);
+            DocumentIndexCommitService commitService = new DocumentIndexCommitService(taskStore, indexStore);
+
+            when(taskStore.findAndLockForCommit(v2Task.getId())).thenReturn(v2Task);
+            when(taskStore.markSucceeded(eq(v2Task.getId()), eq("worker-test"), eq(1L), anyInt(), anyInt(), anyInt()))
+                    .thenReturn(true);
+            when(documentMapper.insert(any(Document.class))).thenReturn(1);
+
+            DocumentIndexTaskExecutor executor = new DocumentIndexTaskExecutor(
+                    storageService, markdownParserService, documentParserService,
+                    incrementalIndexService, documentMapper, commitService, taskStore);
+
+            executor.execute(v2Task);
+
+            // Verification: final commit 使用 INSERT, document version=2 READY
+            ArgumentCaptor<Document> docCaptor = ArgumentCaptor.forClass(Document.class);
+            verify(documentMapper).insert(docCaptor.capture());
+            Document insertedDoc = docCaptor.getValue();
+            assertEquals(docId, insertedDoc.getId());
+            assertEquals(2, insertedDoc.getIndexVersion());
+            assertEquals("READY", insertedDoc.getIndexStatus());
+
+            // Verification: UPDATE is NOT called
+            verify(documentMapper, never()).updateIndexByVersion(any(), anyInt());
+
+            // Verification: task v2 SUCCEEDED
+            assertEquals(DocumentIndexTaskStatus.SUCCEEDED, v2Task.getStatus());
+        } finally {
+            Files.deleteIfExists(tempFile);
+        }
     }
 }

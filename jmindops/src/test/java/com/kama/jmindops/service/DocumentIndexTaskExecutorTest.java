@@ -19,6 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -208,5 +209,125 @@ class DocumentIndexTaskExecutorTest {
         verify(incrementalIndexService, never()).replaceIndex(any(), anyBoolean(), any());
         // Ensure old file cleanup still ran
         verify(documentStorageService).deleteFile("docs/old.md");
+    }
+
+    @Test
+    void missingDocumentInDbInsertsDocumentAsNewEvenWithHigherTaskVersion() throws Exception {
+        com.kama.jmindops.mapper.DocumentMapper documentMapper = mock(com.kama.jmindops.mapper.DocumentMapper.class);
+        DocumentIndexCommitService commitService = mock(DocumentIndexCommitService.class);
+        DocumentIndexTaskStore taskStore = mock(DocumentIndexTaskStore.class);
+
+        DocumentIndexTaskExecutor executorWithDb = new DocumentIndexTaskExecutor(
+                documentStorageService, markdownParserService, documentParserService,
+                incrementalIndexService, documentMapper, commitService, taskStore);
+
+        Path tempFile = Files.createTempFile("test-v3", ".md");
+        Files.writeString(tempFile, "# V3 Content");
+        when(documentStorageService.getFilePath("docs/v3.md")).thenReturn(tempFile);
+        when(markdownParserService.parseMarkdown(any())).thenReturn(List.of(
+                new MarkdownParserService.MarkdownSection("V3", "Content")
+        ));
+
+        // Document row absent in document table (e.g. v1 FAILED, v2 FAILED)
+        when(documentMapper.selectById("doc-100")).thenReturn(null);
+
+        // Task has version 3 and isNewDocument snapshot might even have been false previously
+        DocumentIndexTask taskV3 = DocumentIndexTask.builder()
+                .id("task-v3")
+                .kbId("kb-1")
+                .documentId("doc-100")
+                .indexVersion(3)
+                .status(DocumentIndexTaskStatus.RUNNING)
+                .filePath("docs/v3.md")
+                .filename("v3.md")
+                .filetype("md")
+                .fileSize(100L)
+                .contentHash("hash-v3")
+                .sourceKey("v3.md")
+                .indexFingerprint("fp-1")
+                .isNewDocument(false) // Even if task snapshot was false!
+                .workerId("worker-1")
+                .leaseVersion(2L)
+                .build();
+
+        IncrementalDocumentIndexService.PreparedIndex prepared = new IncrementalDocumentIndexService.PreparedIndex(
+                Document.builder().id("doc-100").indexVersion(3).build(),
+                true, 0, List.of(), new IncrementalDocumentIndexService.IndexResult(1, 0, 1));
+
+        when(incrementalIndexService.prepareIndex(any(Document.class), eq(true), eq(0), any()))
+                .thenReturn(prepared);
+
+        DocumentIndexTaskExecutor.ExecutionResult result = executorWithDb.execute(taskV3);
+
+        // Verified prepareIndex received isNew=true and expectedVersion=0
+        verify(incrementalIndexService).prepareIndex(any(Document.class), eq(true), eq(0), any());
+        verify(commitService).commit(eq(taskV3), eq("worker-1"), eq(2L), eq(prepared));
+        assertThat(result.chunkCount()).isEqualTo(1);
+
+        Files.deleteIfExists(tempFile);
+    }
+
+    @Test
+    void existingDocumentInDbUsesActualDbVersionAsCasExpectedVersion() throws Exception {
+        com.kama.jmindops.mapper.DocumentMapper documentMapper = mock(com.kama.jmindops.mapper.DocumentMapper.class);
+        DocumentIndexCommitService commitService = mock(DocumentIndexCommitService.class);
+        DocumentIndexTaskStore taskStore = mock(DocumentIndexTaskStore.class);
+
+        DocumentIndexTaskExecutor executorWithDb = new DocumentIndexTaskExecutor(
+                documentStorageService, markdownParserService, documentParserService,
+                incrementalIndexService, documentMapper, commitService, taskStore);
+
+        Path tempFile = Files.createTempFile("test-v4", ".md");
+        Files.writeString(tempFile, "# V4 Content");
+        when(documentStorageService.getFilePath("docs/v4.md")).thenReturn(tempFile);
+        when(markdownParserService.parseMarkdown(any())).thenReturn(List.of(
+                new MarkdownParserService.MarkdownSection("V4", "Content")
+        ));
+
+        // Document row in DB is at version 1 (e.g. v1 READY, v2 FAILED, v3 CANCELLED, v4 PENDING)
+        Document existingInDb = Document.builder()
+                .id("doc-200")
+                .kbId("kb-1")
+                .indexVersion(1)
+                .indexStatus("READY")
+                .contentHash("hash-v1")
+                .indexFingerprint("fp-1")
+                .chunkCount(2)
+                .build();
+        when(documentMapper.selectById("doc-200")).thenReturn(existingInDb);
+
+        // Task has version 4
+        DocumentIndexTask taskV4 = DocumentIndexTask.builder()
+                .id("task-v4")
+                .kbId("kb-1")
+                .documentId("doc-200")
+                .indexVersion(4)
+                .status(DocumentIndexTaskStatus.RUNNING)
+                .filePath("docs/v4.md")
+                .filename("v4.md")
+                .filetype("md")
+                .fileSize(120L)
+                .contentHash("hash-v4")
+                .sourceKey("v4.md")
+                .indexFingerprint("fp-1")
+                .workerId("worker-1")
+                .leaseVersion(3L)
+                .build();
+
+        IncrementalDocumentIndexService.PreparedIndex prepared = new IncrementalDocumentIndexService.PreparedIndex(
+                Document.builder().id("doc-200").indexVersion(4).build(),
+                false, 1, List.of(), new IncrementalDocumentIndexService.IndexResult(1, 0, 1));
+
+        // Crucial: expectedVersion MUST be 1 (from DB), NOT 3 (4 - 1)!
+        when(incrementalIndexService.prepareIndex(any(Document.class), eq(false), eq(1), any()))
+                .thenReturn(prepared);
+
+        DocumentIndexTaskExecutor.ExecutionResult result = executorWithDb.execute(taskV4);
+
+        verify(incrementalIndexService).prepareIndex(any(Document.class), eq(false), eq(1), any());
+        verify(commitService).commit(eq(taskV4), eq("worker-1"), eq(3L), eq(prepared));
+        assertThat(result.chunkCount()).isEqualTo(1);
+
+        Files.deleteIfExists(tempFile);
     }
 }

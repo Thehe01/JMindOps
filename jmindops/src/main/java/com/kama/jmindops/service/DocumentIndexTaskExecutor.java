@@ -117,17 +117,16 @@ public class DocumentIndexTaskExecutor {
                 .updatedAt(now)
                 .build();
 
-        boolean isNew = task.isNewDocument();
-        int expectedVersion = task.getIndexVersion() != null ? task.getIndexVersion() - 1 : 0;
+        Document existingInDb = documentMapper != null
+                ? documentMapper.selectById(task.getDocumentId())
+                : null;
+        boolean isNew = documentMapper != null ? (existingInDb == null) : task.isNewDocument();
+        int expectedVersion = 0;
         String previousDbFilePath = null;
-        if (documentMapper != null) {
-            Document existingInDb = documentMapper.selectById(task.getDocumentId());
-            if (existingInDb != null) {
-                isNew = false;
-                previousDbFilePath = storedFilePath(existingInDb);
-                if (existingInDb.getIndexVersion() != null) {
-                    expectedVersion = existingInDb.getIndexVersion();
-                }
+        if (existingInDb != null) {
+            previousDbFilePath = storedFilePath(existingInDb);
+            if (existingInDb.getIndexVersion() != null) {
+                expectedVersion = existingInDb.getIndexVersion();
             }
         }
 

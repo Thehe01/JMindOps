@@ -118,7 +118,7 @@ public class DocumentIndexTaskEnqueueService {
         }
 
         // 4. 计算 documentId、nextVersion、oldFilePath
-        boolean newDocument = existing == null && latestTaskOpt.isEmpty();
+        boolean newDocument = existing == null;
         String documentId;
 
         if (existing != null) {
