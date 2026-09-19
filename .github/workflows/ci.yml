@@ -144,6 +144,13 @@ jobs:
           SPRING_DATASOURCE_URL: jdbc:postgresql://127.0.0.1:5432/jmindops
           SPRING_DATASOURCE_USERNAME: jmindops_owner
           SPRING_DATASOURCE_PASSWORD: jmindops_owner
+      - name: Show surefire reports on failure
+        if: failure()
+        run: |
+          for f in target/surefire-reports/*.txt; do
+            [ -f "$f" ] && echo "=== $f ===" && cat "$f"
+          done
+          docker logs postgres --tail=100
       - name: Cleanup database container
         if: always()
         run: docker rm -f postgres || true
