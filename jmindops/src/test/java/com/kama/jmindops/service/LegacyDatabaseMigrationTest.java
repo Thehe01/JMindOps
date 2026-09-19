@@ -16,11 +16,40 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class LegacyDatabaseMigrationTest {
 
     @Test
-    public void testLegacyMigrationV8ToLatest() {
-        String url = System.getenv().getOrDefault("SPRING_DATASOURCE_URL", "jdbc:postgresql://127.0.0.1:5432/jmindops");
-        String user = System.getenv().getOrDefault("SPRING_DATASOURCE_USERNAME", "jmindops_owner");
-        String pass = System.getenv().getOrDefault("SPRING_DATASOURCE_PASSWORD", "jmindops_owner");
+    public void testLegacyMigrationV8ToLatest() throws Exception {
+        int targetPort = -1;
+        for (int port : new int[]{5432, 5433}) {
+            try (java.net.Socket socket = new java.net.Socket("127.0.0.1", port)) {
+                targetPort = port;
+                break;
+            } catch (Exception ignored) {}
+        }
 
+        if (targetPort < 0) {
+            org.junit.jupiter.api.Assertions.fail("Live PostgreSQL on port 5432 or 5433 is required for this migration test");
+        }
+
+        String user = System.getenv().getOrDefault("POSTGRES_USER", "jmindops_owner");
+        String pass = System.getenv().getOrDefault("POSTGRES_PASSWORD", "jmindops_owner");
+        String defaultDb = System.getenv().getOrDefault("POSTGRES_DB", "jmindops");
+        String legacyDb = System.getenv().getOrDefault("POSTGRES_LEGACY_TEST_DB", "jmindops_legacy_test");
+
+        // Ensure legacyDb exists by connecting to default database
+        String adminUrl = "jdbc:postgresql://127.0.0.1:" + targetPort + "/" + defaultDb;
+        try (java.sql.Connection adminConn = java.sql.DriverManager.getConnection(adminUrl, user, pass);
+             java.sql.Statement adminStmt = adminConn.createStatement()) {
+            boolean exists = false;
+            try (java.sql.ResultSet rs = adminStmt.executeQuery("SELECT 1 FROM pg_database WHERE datname = '" + legacyDb + "'")) {
+                if (rs.next()) {
+                    exists = true;
+                }
+            }
+            if (!exists) {
+                adminStmt.execute("CREATE DATABASE " + legacyDb);
+            }
+        }
+
+        String url = "jdbc:postgresql://127.0.0.1:" + targetPort + "/" + legacyDb;
         DriverManagerDataSource dataSource = new DriverManagerDataSource(url, user, pass);
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
 

@@ -99,14 +99,32 @@ class FlywayCleanDatabaseMigrationTest {
             org.junit.jupiter.api.Assertions.fail("Live PostgreSQL on port 5432 or 5433 is required for this migration test");
         }
 
-        String jdbcUrl = "jdbc:postgresql://127.0.0.1:" + targetPort + "/jmindops_flyway_test";
-        String username = "postgres";
-        String password = "postgres";
+        String username = System.getenv().getOrDefault("POSTGRES_USER", "jmindops_owner");
+        String password = System.getenv().getOrDefault("POSTGRES_PASSWORD", "jmindops_owner");
+        String defaultDb = System.getenv().getOrDefault("POSTGRES_DB", "jmindops");
+        String testDb = System.getenv().getOrDefault("POSTGRES_FLYWAY_TEST_DB", "jmindops_flyway_test");
+
+        // Ensure test database exists by connecting to default database
+        String adminUrl = "jdbc:postgresql://127.0.0.1:" + targetPort + "/" + defaultDb;
+        try (Connection adminConn = DriverManager.getConnection(adminUrl, username, password);
+             Statement adminStmt = adminConn.createStatement()) {
+            boolean exists = false;
+            try (ResultSet rs = adminStmt.executeQuery("SELECT 1 FROM pg_database WHERE datname = '" + testDb + "'")) {
+                if (rs.next()) {
+                    exists = true;
+                }
+            }
+            if (!exists) {
+                adminStmt.execute("CREATE DATABASE " + testDb);
+            }
+        }
+
+        String jdbcUrl = "jdbc:postgresql://127.0.0.1:" + targetPort + "/" + testDb;
 
         // Clean out schema so it is truly migrating from an empty database
         try (Connection conn = DriverManager.getConnection(jdbcUrl, username, password);
              Statement stmt = conn.createStatement()) {
-            stmt.execute("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO postgres; GRANT ALL ON SCHEMA public TO public;");
+            stmt.execute("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO " + username + "; GRANT ALL ON SCHEMA public TO public;");
             stmt.execute("CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pg_search;");
         }
 

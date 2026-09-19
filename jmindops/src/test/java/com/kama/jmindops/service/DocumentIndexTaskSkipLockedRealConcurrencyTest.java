@@ -134,14 +134,17 @@ class DocumentIndexTaskSkipLockedRealConcurrencyTest {
 
         org.springframework.jdbc.datasource.DriverManagerDataSource ds =
                 new org.springframework.jdbc.datasource.DriverManagerDataSource(jdbcUrl, username, password);
-        JdbcTemplate realJdbc = new JdbcTemplate(ds);
+        org.flywaydb.core.Flyway flyway = org.flywaydb.core.Flyway.configure()
+                .dataSource(ds)
+                .locations("classpath:db/migration")
+                .baselineOnMigrate(true)
+                .baselineVersion("0")
+                .load();
+        flyway.migrate();
 
+        JdbcTemplate realJdbc = new JdbcTemplate(ds);
         String kbId = java.util.UUID.randomUUID().toString();
-        try {
-            realJdbc.execute("INSERT INTO knowledge_base (id, name) VALUES ('" + kbId + "', 'test-skip-locked-kb') ON CONFLICT DO NOTHING");
-        } catch (Exception ignored) {
-            return;
-        }
+        realJdbc.execute("INSERT INTO knowledge_base (id, name) VALUES ('" + kbId + "', 'test-skip-locked-kb') ON CONFLICT DO NOTHING");
 
         int totalTasks = 10;
         int workerCount = 4;

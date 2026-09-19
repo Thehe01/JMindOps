@@ -201,16 +201,19 @@ class DocumentIndexTaskVersionOrderingIntegrationTest {
         JdbcTemplate realJdbc = new JdbcTemplate(ds);
         DocumentIndexTaskStore realStore = new DocumentIndexTaskStore(realJdbc);
 
+        org.flywaydb.core.Flyway flyway = org.flywaydb.core.Flyway.configure()
+                .dataSource(ds)
+                .locations("classpath:db/migration")
+                .baselineOnMigrate(true)
+                .baselineVersion("0")
+                .load();
+        flyway.migrate();
+
         String kbId = UUID.randomUUID().toString();
         String docA = UUID.randomUUID().toString();
         String docB = UUID.randomUUID().toString();
 
-        try {
-            realJdbc.execute("INSERT INTO knowledge_base (id, name) VALUES ('" + kbId + "', 'test-kb') ON CONFLICT DO NOTHING");
-        } catch (Exception ignored) {
-            // If schema not fully migrated, skip
-            return;
-        }
+        realJdbc.execute("INSERT INTO knowledge_base (id, name) VALUES ('" + kbId + "', 'test-kb') ON CONFLICT DO NOTHING");
 
         try {
             LocalDateTime now = LocalDateTime.now();

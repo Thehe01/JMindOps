@@ -137,6 +137,13 @@ jobs:
           done
       - name: Run PostgreSQL Integration Tests
         run: mvn -B -ntp verify -Dgroups="postgres-integration" -Dtest.excluded-groups=live -Dspring.datasource.url=jdbc:postgresql://127.0.0.1:5432/jmindops -Dspring.datasource.username=jmindops_owner -Dspring.datasource.password=jmindops_owner -Dspring.flyway.user=jmindops_owner -Dspring.flyway.password=jmindops_owner
+        env:
+          POSTGRES_USER: jmindops_owner
+          POSTGRES_PASSWORD: jmindops_owner
+          POSTGRES_DB: jmindops
+          SPRING_DATASOURCE_URL: jdbc:postgresql://127.0.0.1:5432/jmindops
+          SPRING_DATASOURCE_USERNAME: jmindops_owner
+          SPRING_DATASOURCE_PASSWORD: jmindops_owner
       - name: Cleanup database container
         if: always()
         run: docker rm -f postgres || true
