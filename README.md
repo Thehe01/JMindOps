@@ -4,25 +4,6 @@ JMindOps 不是一个只会“接模型、套聊天页面”的 Agent Demo，而
 
 它使用 Spring AI 实现可控的 ReAct 单步循环，支持动态 Agent 装配、混合检索 RAG、敏感工具审批和 SSE 流式交互；同时把每轮生成建模为持久任务，用幂等键、事务后派发、Redis single-flight 和恢复扫描处理重复请求、进程中断与事件丢失。V8 进一步把路由、每轮思考和工具调用保存为脱敏 Trace，并用 AgentEval 固定题集量化路由、选工具、审批合规和步数效率。
 
-## 为什么这个项目适合面试
-
-| 面试官常问的问题 | 项目里的可验证实现 |
-| --- | --- |
-| HTTP 超时或用户重复点击会不会产生两条消息？ | 客户端为一次发送生成 `requestId`；PostgreSQL advisory lock 关闭同 key 的并发竞态，唯一约束兜底，并用 SHA-256 请求指纹拒绝同键异参。 |
-| 数据已提交，但异步事件没有执行怎么办？ | 用户消息与 `generation_task(PENDING)` 在同一事务提交；监听器只在 `AFTER_COMMIT` 执行，定时恢复器会重新派发超时的 PENDING 任务。 |
-| 多实例会不会同时跑同一会话？ | Redis Lua 将会话锁从 `reserved:generationId` 原子切换到 `running:generationId`；看门狗续租，异常时按 generationId 匹配释放。 |
-| Agent 能否直接执行危险操作？ | 工具白名单、资源所有权校验、默认关闭、ToolCallback 边界审批、AOP 直接调用兜底、参数指纹和 PostgreSQL 原子单次消费共同约束执行。 |
-| 重复上传或只修改部分文档会不会全部重算？ | 以规范化文件名识别逻辑文档，SHA-256 判断内容是否变化；新版本仅为新增/变化的 chunk 生成向量，并在事务内原子切换索引。 |
-| RAG “效果好”如何证明？ | 检索层输出 HitRate@K、Recall@K、MRR、No-answer Accuracy 和 P50/P95；端到端层另测答案要点、引用编号、拒答、Token 与整题通过率。 |
-| Agent “能完成任务”如何证明？ | 每个 generationId 可查询路由、步骤、Token、延迟和工具状态；REVIEWED AgentEval 用固定规则计算路由、工具序列、调用次数、越权规避、审批与任务通过率。 |
-| 弱网断流后如何恢复界面？ | 每轮生成有独立 generationId 和 DONE/ERROR 终态；前端过滤串流，并用持久消息历史重新对账。 |
-
-这套实现刻意区分三种语义：
-
-- `requestId` 解决 HTTP 请求幂等；
-- `generationId` 标识一次具体执行尝试；
-- Redis 锁解决同一会话的并发执行，不替代业务幂等。
-
 ## 核心架构
 
 ```mermaid
