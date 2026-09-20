@@ -93,8 +93,14 @@ class AgentHardenedPostgresIntegrationTest {
             return;
         }
 
-        String username = System.getenv().getOrDefault("POSTGRES_USER", "jmindops_owner");
-        String password = System.getenv().getOrDefault("POSTGRES_PASSWORD", "jmindops_owner");
+        String username = System.getProperty("spring.datasource.username");
+        if (username == null || username.isBlank()) {
+            username = System.getenv().getOrDefault("POSTGRES_USER", "jmindops_owner");
+        }
+        String password = System.getProperty("spring.datasource.password");
+        if (password == null || password.isBlank()) {
+            password = System.getenv().getOrDefault("POSTGRES_PASSWORD", "jmindops_owner");
+        }
 
         try {
             dataSource = new DriverManagerDataSource(jdbcUrl, username, password);
@@ -126,6 +132,8 @@ class AgentHardenedPostgresIntegrationTest {
 
             postgresAvailable = true;
         } catch (Exception e) {
+            System.err.println("[AgentHardenedPostgresIntegrationTest] Failed to connect/migrate PostgreSQL: " + e.getMessage());
+            e.printStackTrace();
             postgresAvailable = false;
         }
     }

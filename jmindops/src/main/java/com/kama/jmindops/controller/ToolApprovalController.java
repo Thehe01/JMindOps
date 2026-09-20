@@ -100,7 +100,14 @@ public class ToolApprovalController {
                 });
             } else {
                 // If not running in an active transaction (e.g. unit tests without Spring transaction manager)
-                agentResumeService.resume(targetGenerationId);
+                log.info("Triggering async agent resume without active tx synchronization: generationId={}", targetGenerationId);
+                CompletableFuture.runAsync(() -> {
+                    try {
+                        agentResumeService.resume(targetGenerationId);
+                    } catch (Exception e) {
+                        log.error("Async agent resume failed: generationId={}", targetGenerationId, e);
+                    }
+                });
             }
             return ApiResponse.success();
         }

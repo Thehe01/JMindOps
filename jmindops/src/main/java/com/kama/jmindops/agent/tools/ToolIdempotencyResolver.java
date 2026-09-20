@@ -94,7 +94,9 @@ public class ToolIdempotencyResolver {
             try {
                 Method getMethod = actual.getClass().getMethod("getToolMethod");
                 method = (Method) getMethod.invoke(actual);
-            } catch (NoSuchMethodException e) {
+            } catch (NoSuchMethodException ignored) {}
+
+            if (method == null) {
                 try {
                     Method getMethod = actual.getClass().getMethod("getMethod");
                     method = (Method) getMethod.invoke(actual);
@@ -104,6 +106,33 @@ public class ToolIdempotencyResolver {
                 Method getTarget = actual.getClass().getMethod("getTarget");
                 target = getTarget.invoke(actual);
             } catch (NoSuchMethodException ignored) {}
+
+            if (target == null) {
+                try {
+                    Method getTarget = actual.getClass().getMethod("getToolObject");
+                    target = getTarget.invoke(actual);
+                } catch (NoSuchMethodException ignored) {}
+            }
+
+            // Inspect declared fields across class hierarchy (e.g. MethodToolCallback.toolMethod, toolObject)
+            Class<?> curr = actual.getClass();
+            while (curr != null && curr != Object.class) {
+                for (java.lang.reflect.Field f : curr.getDeclaredFields()) {
+                    if (method == null && Method.class.isAssignableFrom(f.getType())) {
+                        try {
+                            f.setAccessible(true);
+                            method = (Method) f.get(actual);
+                        } catch (Exception ignored) {}
+                    }
+                    if (target == null && (f.getName().equals("toolObject") || f.getName().equals("target"))) {
+                        try {
+                            f.setAccessible(true);
+                            target = f.get(actual);
+                        } catch (Exception ignored) {}
+                    }
+                }
+                curr = curr.getSuperclass();
+            }
 
             if (method != null) {
                 IdempotentTool annotation = AnnotatedElementUtils.findMergedAnnotation(method, IdempotentTool.class);

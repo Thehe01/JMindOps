@@ -657,6 +657,64 @@ class AgentCheckpointResumeTest {
         verify(checkpointStore, never()).markToolFailed(eq(generationId), eq("tc-risk"), anyString());
     }
 
+    /**
+     * 12. 场景 L：在 Agent 执行过程中 Checkpoint 提交因租约过期被 Fencing 拒绝。
+     * 必须直接抛出 StaleGenerationLeaseException，不包装为通用异常，且绝不能覆写持久化状态为 FAILED 或发送 AI_ERROR SSE。
+     */
+    @Test
+    void staleLeaseExceptionDuringExecutionPreservesFencingWithoutMarkingFailed() {
+        String generationId = "gen-stale-lease-test";
+        String sessionId = "session-stale";
+        AgentCheckpointStore checkpointStore = mock(AgentCheckpointStore.class);
+        ToolIdempotencyResolver idempotencyResolver = mock(ToolIdempotencyResolver.class);
+        GenerationTaskStore taskStore = mock(GenerationTaskStore.class);
+        ChatGenerationCoordinator coordinator = mock(ChatGenerationCoordinator.class);
+        JMindOpsFactory factory = mock(JMindOpsFactory.class);
+        SseService sseService = mock(SseService.class);
+
+        GenerationTask task = new GenerationTask(
+                generationId, null, "user-1", "alice", "USER", "req-1", "fp-1",
+                "agent-1", sessionId, "msg-1", "input", GenerationTask.Status.RUNNING,
+                1, null, null, null, null, null, null, null, "worker-1", 1L
+        );
+        when(taskStore.findExecutionTask(generationId)).thenReturn(Optional.of(task));
+        when(coordinator.claimForResume(sessionId, generationId)).thenReturn(true);
+        when(taskStore.claimForResume(eq(generationId), anyString())).thenReturn(1L);
+
+        ChatClient chatClient = mockChatClientWithFinalAnswer("answer");
+        JMindOps runtime = new JMindOps(
+                "agent-1", "test-agent", "", "", chatClient,
+                20, 0.0, 0.9,
+                List.of(new UserMessage("test")),
+                List.of(), List.of(),
+                sessionId, generationId,
+                mock(ApplicationEventPublisher.class),
+                null, RoutingDecision.CHAT, "test",
+                AgentExecutionPolicy.plan(RoutingDecision.CHAT, "test"),
+                Duration.ofSeconds(60),
+                checkpointStore, idempotencyResolver,
+                "worker-1", 1L
+        );
+
+        // Checkpoint store throws StaleGenerationLeaseException during saveCheckpoint
+        org.mockito.Mockito.doThrow(new StaleGenerationLeaseException("Lease expired"))
+                .when(checkpointStore).saveCheckpoint(any(), anyString(), anyLong());
+
+        when(factory.createForResume(any(), anyString(), anyLong())).thenReturn(runtime);
+
+        AgentResumeService resumeService = new AgentResumeService(
+                taskStore, coordinator, factory, sseService);
+
+        // Calling resume should fail due to StaleGenerationLeaseException
+        assertThatThrownBy(() -> resumeService.resume(generationId))
+                .isInstanceOf(StaleGenerationLeaseException.class);
+
+        // Fencing guarantee: task must NEVER be marked FAILED, and terminal AI_ERROR must NEVER be sent!
+        verify(taskStore, never()).markFailed(anyString(), anyString());
+        verify(taskStore, never()).markFailed(anyString(), anyString(), anyLong(), anyString());
+        verify(sseService, never()).send(eq(sessionId), any());
+    }
+
     private ChatClient mockChatClientWithFinalAnswer(String answer) {
         ChatClient chatClient = mock(ChatClient.class);
         ChatClient.ChatClientRequestSpec requestSpec = mock(ChatClient.ChatClientRequestSpec.class);

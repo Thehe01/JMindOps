@@ -120,7 +120,7 @@ public class AgentResumeService {
 
     private void handleResumeException(String sessionId, String generationId, String workerId, long leaseVersion, Exception e) {
         log.error("恢复 Agent 生成失败: sessionId={}, generationId={}", sessionId, generationId, e);
-        if (!(e instanceof com.kama.jmindops.exception.StaleGenerationLeaseException)) {
+        if (!isStaleLease(e)) {
             try {
                 if (leaseVersion > 0) {
                     generationTaskStore.markFailed(generationId, workerId, leaseVersion, e.getMessage());
@@ -135,6 +135,16 @@ public class AgentResumeService {
             log.warn("Worker lease expired or displaced by another worker, skipping markFailed: generationId={}, workerId={}",
                     generationId, workerId);
         }
+    }
+
+    private boolean isStaleLease(Throwable t) {
+        while (t != null) {
+            if (t instanceof com.kama.jmindops.exception.StaleGenerationLeaseException) {
+                return true;
+            }
+            t = t.getCause();
+        }
+        return false;
     }
 
     private void installExecutionSecurityContext(GenerationTask task) {

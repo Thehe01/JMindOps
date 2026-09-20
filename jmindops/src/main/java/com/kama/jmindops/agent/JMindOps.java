@@ -1025,6 +1025,10 @@ public class JMindOps {
             if (agentState != AgentState.WAITING_APPROVAL) {
                 agentState = AgentState.FINISHED;
             }
+        } catch (com.kama.jmindops.exception.StaleGenerationLeaseException e) {
+            agentState = AgentState.ERROR;
+            log.warn("Agent execution terminated due to stale generation lease: generationId={}", this.generationId, e);
+            throw e;
         } catch (Exception e) {
             agentState = AgentState.ERROR;
             log.error("Error running agent", e);

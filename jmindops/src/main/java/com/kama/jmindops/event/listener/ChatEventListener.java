@@ -92,14 +92,12 @@ public class ChatEventListener {
 
             // 1. 调用意图重写器，结合上下文补全省略语
             String rewrittenInput = routerAgent.rewrite(sessionId, task.inputContent());
-            generationTaskStore.touchHeartbeat(generationId, workerId, leaseVersion);
-            generationTaskStore.touchHeartbeat(generationId);
+            touchHeartbeatWithFencing(generationId, workerId, leaseVersion);
 
             // 2. 调用意图路由代理进行分类（使用重写后的文本）
             RoutingDecision decision = routerAgent.route(rewrittenInput);
             agentTraceStore.recordRouting(generationId, decision.name());
-            generationTaskStore.touchHeartbeat(generationId, workerId, leaseVersion);
-            generationTaskStore.touchHeartbeat(generationId);
+            touchHeartbeatWithFencing(generationId, workerId, leaseVersion);
             log.info("Routing decision: sessionId={}, generationId={}, decision={}",
                     sessionId, generationId, decision);
 
@@ -110,8 +108,7 @@ public class ChatEventListener {
                 jMindOps = jMindOpsFactory.create(
                         task.agentId(), sessionId, decision, generationId, rewrittenInput);
             }
-            generationTaskStore.touchHeartbeat(generationId, workerId, leaseVersion);
-            generationTaskStore.touchHeartbeat(generationId);
+            touchHeartbeatWithFencing(generationId, workerId, leaseVersion);
             jMindOps.run();
             if (jMindOps.getAgentState() == com.kama.jmindops.agent.AgentState.WAITING_APPROVAL) {
                 log.info("Generation suspended waiting for approval: sessionId={}, generationId={}",
@@ -137,7 +134,7 @@ public class ChatEventListener {
             }
         } catch (Exception e) {
             log.error("Agent generation failed: sessionId={}, generationId={}", sessionId, generationId, e);
-            if (!(e instanceof com.kama.jmindops.exception.StaleGenerationLeaseException)) {
+            if (!isStaleLease(e)) {
                 try {
                     if (leaseVersion > 0) {
                         generationTaskStore.markFailed(generationId, workerId, leaseVersion, e.getMessage());
@@ -158,6 +155,24 @@ public class ChatEventListener {
                 chatGenerationCoordinator.release(sessionId, generationId);
             }
         }
+    }
+
+    private void touchHeartbeatWithFencing(String generationId, String workerId, long leaseVersion) {
+        if (leaseVersion > 0) {
+            generationTaskStore.touchHeartbeat(generationId, workerId, leaseVersion);
+        } else {
+            generationTaskStore.touchHeartbeat(generationId);
+        }
+    }
+
+    private boolean isStaleLease(Throwable t) {
+        while (t != null) {
+            if (t instanceof com.kama.jmindops.exception.StaleGenerationLeaseException) {
+                return true;
+            }
+            t = t.getCause();
+        }
+        return false;
     }
 
     private void installExecutionSecurityContext(GenerationTask task) {

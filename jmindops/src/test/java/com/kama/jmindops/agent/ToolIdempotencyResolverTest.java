@@ -13,21 +13,25 @@ class ToolIdempotencyResolverTest {
     private final ToolIdempotencyResolver resolver = new ToolIdempotencyResolver();
 
     static class SampleToolService {
+        @org.springframework.ai.tool.annotation.Tool(description = "safe tool")
         @IdempotentTool(value = true)
         public String safeTool() {
             return "safe";
         }
 
+        @org.springframework.ai.tool.annotation.Tool(description = "unsafe tool")
         @IdempotentTool(value = false)
         public String unsafeTool() {
             return "unsafe";
         }
 
+        @org.springframework.ai.tool.annotation.Tool(description = "safe with key")
         @IdempotentTool(value = true, supportsIdempotencyKey = true)
         public String safeWithKey() {
             return "safeKey";
         }
 
+        @org.springframework.ai.tool.annotation.Tool(description = "unannotated tool")
         public String unannotatedTool() {
             return "none";
         }
@@ -80,5 +84,46 @@ class ToolIdempotencyResolverTest {
 
         Method unannotated = SampleToolService.class.getMethod("unannotatedTool");
         assertThat(resolver.isIdempotent("unannotatedTool", target, unannotated)).isFalse();
+    }
+
+    @Test
+    void methodToolCallbackWithAnnotationResolvesIdempotency() {
+        SampleToolService target = new SampleToolService();
+        org.springframework.ai.tool.ToolCallback[] callbacks = org.springframework.ai.tool.method.MethodToolCallbackProvider.builder()
+                .toolObjects(target)
+                .build()
+                .getToolCallbacks();
+
+        assertThat(callbacks).isNotEmpty();
+
+        org.springframework.ai.tool.ToolCallback safeCb = java.util.Arrays.stream(callbacks)
+                .filter(cb -> cb.getToolDefinition().name().equals("safeTool"))
+                .findFirst()
+                .orElse(null);
+        assertThat(safeCb).isNotNull();
+        assertThat(resolver.isIdempotent("safeTool", safeCb)).isTrue();
+        assertThat(resolver.supportsIdempotencyKey("safeTool", safeCb)).isFalse();
+
+        org.springframework.ai.tool.ToolCallback unsafeCb = java.util.Arrays.stream(callbacks)
+                .filter(cb -> cb.getToolDefinition().name().equals("unsafeTool"))
+                .findFirst()
+                .orElse(null);
+        assertThat(unsafeCb).isNotNull();
+        assertThat(resolver.isIdempotent("unsafeTool", unsafeCb)).isFalse();
+
+        org.springframework.ai.tool.ToolCallback safeWithKeyCb = java.util.Arrays.stream(callbacks)
+                .filter(cb -> cb.getToolDefinition().name().equals("safeWithKey"))
+                .findFirst()
+                .orElse(null);
+        assertThat(safeWithKeyCb).isNotNull();
+        assertThat(resolver.isIdempotent("safeWithKey", safeWithKeyCb)).isTrue();
+        assertThat(resolver.supportsIdempotencyKey("safeWithKey", safeWithKeyCb)).isTrue();
+
+        org.springframework.ai.tool.ToolCallback unannotatedCb = java.util.Arrays.stream(callbacks)
+                .filter(cb -> cb.getToolDefinition().name().equals("unannotatedTool"))
+                .findFirst()
+                .orElse(null);
+        assertThat(unannotatedCb).isNotNull();
+        assertThat(resolver.isIdempotent("unannotatedTool", unannotatedCb)).isFalse();
     }
 }
