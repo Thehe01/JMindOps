@@ -39,14 +39,32 @@ jobs:
           java-version: "17"
           cache: maven
       - name: Verify without live model calls
-        run: mvn -B -ntp verify
-      - name: Dump surefire reports on failure
+        run: mvn -B -ntp verify 2>&1 | tee maven-verify.log
+      - name: Dump diagnostics on failure
         if: failure()
         run: |
-          for f in $(find target/surefire-reports -name "*.txt"); do
-            echo "==== $f ===="
-            cat "$f"
+          echo "### Maven Build Failure Tail" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          tail -n 200 maven-verify.log >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          for f in target/surefire-reports/*.txt; do
+            if [ -f "$f" ]; then
+              if grep -E -q "FAILURE!|ERROR!" "$f"; then
+                echo "### Failure in $f" >> "$GITHUB_STEP_SUMMARY"
+                echo '```text' >> "$GITHUB_STEP_SUMMARY"
+                cat "$f" >> "$GITHUB_STEP_SUMMARY"
+                echo '```' >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
           done
+      - name: Upload build logs and reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maven-build-diagnostics
+          path: |
+            jmindops/maven-verify.log
+            jmindops/target/surefire-reports/
 
   frontend:
     name: Frontend build and production dependency audit
