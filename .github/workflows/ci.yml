@@ -117,7 +117,7 @@ jobs:
       - name: Validate Compose model
         run: docker compose config --quiet
       - name: Build and start from empty volumes
-        run: docker compose up --detach --build --wait --wait-timeout 240
+        run: docker compose up --detach --build --wait --wait-timeout 300 2>&1 | tee docker-compose-up.log
       - name: Verify health and Flyway history
         run: |
           curl --fail --retry 10 --retry-delay 2 http://127.0.0.1:3000/health
@@ -128,7 +128,15 @@ jobs:
             --command "SELECT COUNT(*) FROM flyway_schema_history WHERE success"
       - name: Show diagnostics on failure
         if: failure()
-        run: docker compose logs --no-color --tail=200
+        run: |
+          echo "### Docker Compose Up Output" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          tail -n 100 docker-compose-up.log >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "### Docker Compose Logs" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          docker compose logs --no-color --tail=200 >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
       - name: Remove test stack and volumes
         if: always()
         run: docker compose down --volumes --remove-orphans

@@ -46,7 +46,7 @@ public class GenerationTaskRecovery {
             ChatGenerationCoordinator chatGenerationCoordinator,
             ApplicationEventPublisher publisher,
             SseService sseService,
-            @org.springframework.beans.factory.annotation.Autowired(required = false) AgentResumeService agentResumeService,
+            @org.springframework.lang.Nullable AgentResumeService agentResumeService,
             @Value("${app.generation.pending-redispatch-after-seconds:15}") long pendingRedispatchAfterSeconds,
             @Value("${app.generation.running-timeout-seconds:3600}") long runningTimeoutSeconds,
             @Value("${app.generation.recovery-batch-size:20}") int batchSize
