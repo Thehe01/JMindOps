@@ -137,6 +137,12 @@ jobs:
           echo '```text' >> "$GITHUB_STEP_SUMMARY"
           docker compose logs --no-color --tail=200 >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail_up=$(tail -n 30 docker-compose-up.log | tr '\r\n' ' ' | head -c 2000)
+          echo "::error title=DockerComposeUp::$tail_up"
+          tail_app=$(docker compose logs --no-color jmindops --tail=30 2>&1 | tr '\r\n' ' ' | head -c 2000)
+          echo "::error title=JmindopsLogs::$tail_app"
+          tail_db=$(docker compose logs --no-color db --tail=20 2>&1 | tr '\r\n' ' ' | head -c 2000)
+          echo "::error title=DbLogs::$tail_db"
       - name: Remove test stack and volumes
         if: always()
         run: docker compose down --volumes --remove-orphans
