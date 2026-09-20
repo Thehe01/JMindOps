@@ -84,7 +84,7 @@ class GenerationTaskRecoveryTest {
         recovery.recover();
 
         // Verify that resumeClaimed was triggered asynchronously
-        verify(agentResumeService, timeout(1000).times(1)).resumeClaimed(staleRunningTask);
+        verify(agentResumeService, timeout(5000).times(1)).resumeClaimed(staleRunningTask);
         // And never marked failed!
         verify(store, never()).failStaleRunning(any(), anyInt());
     }

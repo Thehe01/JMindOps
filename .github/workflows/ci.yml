@@ -40,6 +40,13 @@ jobs:
           cache: maven
       - name: Verify without live model calls
         run: mvn -B -ntp verify
+      - name: Dump surefire reports on failure
+        if: failure()
+        run: |
+          for f in $(find target/surefire-reports -name "*.txt"); do
+            echo "==== $f ===="
+            cat "$f"
+          done
 
   frontend:
     name: Frontend build and production dependency audit

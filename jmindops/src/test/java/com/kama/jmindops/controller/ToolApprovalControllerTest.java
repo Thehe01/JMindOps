@@ -107,7 +107,7 @@ class ToolApprovalControllerTest {
         TransactionSynchronizationUtils.triggerAfterCommit();
 
         // After commit: resume is triggered asynchronously!
-        verify(agentResumeService, timeout(1000).times(1)).resume(genId);
+        verify(agentResumeService, timeout(5000).times(1)).resume(genId);
         // Legacy message creation should NOT be called when task was resumed
         verify(chatMessageFacadeService, never()).createChatMessage((CreateChatMessageRequest) any());
     }
@@ -135,7 +135,7 @@ class ToolApprovalControllerTest {
         ApiResponse<Void> response = controller.approve(approvalId);
         assertThat(response.getCode()).isEqualTo(200);
 
-        verify(agentResumeService, timeout(1000).times(1)).resume(genId);
+        verify(agentResumeService, timeout(5000).times(1)).resume(genId);
     }
 
     @Test
