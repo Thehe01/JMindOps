@@ -50,6 +50,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @Tag("postgres-integration")
@@ -465,5 +467,141 @@ class AgentHardenedPostgresIntegrationTest {
         assertThat(toolExec).isPresent();
         assertThat(toolExec.get().status()).isEqualTo(AgentToolExecution.Status.SUCCEEDED);
         assertThat(toolExec.get().result()).isEqualTo("Hangzhou is the capital of Zhejiang");
+    }
+
+    /**
+     * 6. stale worker cannot invoke tool or mutate ledger (live PG test)
+     */
+    @Test
+    void staleWorkerCannotInvokeToolOrMutateLedger() {
+        String genId = UUID.randomUUID().toString();
+        String reqId = UUID.randomUUID().toString();
+
+        taskStore.createPending(genId, null, TEST_USER_ID, reqId, "fp-stale-tool",
+                TEST_AGENT_ID, TEST_SESSION_ID, null, "stale worker tool test");
+
+        long lease1 = taskStore.claimForExecution(genId, "worker-1");
+        assertThat(lease1).isEqualTo(1L);
+
+        String toolCallId = "tc-stale-" + UUID.randomUUID();
+        AssistantMessage.ToolCall toolCall = new AssistantMessage.ToolCall(
+                toolCallId, "function", "paymentTool", "{\"amount\":100}"
+        );
+        checkpointStore.recordPreparedToolCall(genId, 1, toolCall, false, "worker-1", 1L);
+
+        Optional<AgentToolExecution> toolExec = checkpointStore.findToolExecution(genId, toolCallId);
+        assertThat(toolExec).isPresent();
+        assertThat(toolExec.get().status()).isEqualTo(AgentToolExecution.Status.PREPARED);
+
+        // Worker-1 saves checkpoint at MODEL_OUTPUT with pending tool call while lease is valid (1L)
+        AgentCheckpoint modelOutputCheckpoint = new AgentCheckpoint(
+                UUID.randomUUID().toString(),
+                genId,
+                1,
+                1L,
+                AgentCheckpoint.Stage.MODEL_OUTPUT,
+                GenerationTask.Status.RUNNING,
+                CheckpointPayload.serializeMessages(List.of(new UserMessage("execute payment"))),
+                CheckpointPayload.serializeRuntimeState(new CheckpointPayload.CheckpointRuntimeState(
+                        RoutingDecision.CHAT.name(), List.of(), 0, null, false, 0, 100L, 1, 0)),
+                CheckpointPayload.serializeToolCalls(List.of(toolCall)),
+                null,
+                null,
+                null
+        );
+        checkpointStore.saveCheckpoint(modelOutputCheckpoint, "worker-1", 1L);
+
+        // Worker-2 takes over task (lease bumps to 2 in PostgreSQL)
+        long lease2 = taskStore.claimForResume(genId, "worker-2", 1L);
+        assertThat(lease2).isEqualTo(2L);
+
+        // 1. Stale worker-1 attempts heartbeat -> REJECTED BY FENCING
+        boolean heartbeatOk = taskStore.touchHeartbeat(genId, "worker-1", 1L);
+        assertThat(heartbeatOk).isFalse();
+
+        // 2. Stale worker-1 attempts ledger mutations with outdated lease 1 -> ALL REJECTED BY FENCING
+        String newToolCallId = "tc-stale-new-" + UUID.randomUUID();
+        AssistantMessage.ToolCall newCall = new AssistantMessage.ToolCall(newToolCallId, "function", "newTool", "{}");
+        assertThatThrownBy(() -> checkpointStore.recordPreparedToolCall(genId, 1, newCall, false, "worker-1", 1L))
+                .isInstanceOf(StaleGenerationLeaseException.class)
+                .hasMessageContaining("rejected by fencing");
+
+        assertThatThrownBy(() -> checkpointStore.recordToolPrepared(genId, 1, newCall, false, "worker-1", 1L))
+                .isInstanceOf(StaleGenerationLeaseException.class)
+                .hasMessageContaining("rejected by fencing");
+
+        assertThatThrownBy(() -> checkpointStore.markToolExecuting(genId, toolCallId, "worker-1", 1L))
+                .isInstanceOf(StaleGenerationLeaseException.class)
+                .hasMessageContaining("rejected by fencing");
+
+        assertThatThrownBy(() -> checkpointStore.recordToolExecuting(genId, toolCallId, "worker-1", 1L))
+                .isInstanceOf(StaleGenerationLeaseException.class)
+                .hasMessageContaining("rejected by fencing");
+
+        assertThatThrownBy(() -> checkpointStore.markToolSucceeded(genId, toolCallId, "done", "worker-1", 1L))
+                .isInstanceOf(StaleGenerationLeaseException.class)
+                .hasMessageContaining("rejected by fencing");
+
+        assertThatThrownBy(() -> checkpointStore.recordToolSucceeded(genId, toolCallId, "done", "worker-1", 1L))
+                .isInstanceOf(StaleGenerationLeaseException.class)
+                .hasMessageContaining("rejected by fencing");
+
+        assertThatThrownBy(() -> checkpointStore.markToolWaitingApproval(genId, toolCallId, "waiting", "worker-1", 1L))
+                .isInstanceOf(StaleGenerationLeaseException.class)
+                .hasMessageContaining("rejected by fencing");
+
+        assertThatThrownBy(() -> checkpointStore.recordToolWaitingApproval(genId, toolCallId, "waiting", "worker-1", 1L))
+                .isInstanceOf(StaleGenerationLeaseException.class)
+                .hasMessageContaining("rejected by fencing");
+
+        assertThatThrownBy(() -> checkpointStore.markToolUnknown(genId, toolCallId, "unknown err", "worker-1", 1L))
+                .isInstanceOf(StaleGenerationLeaseException.class)
+                .hasMessageContaining("rejected by fencing");
+
+        assertThatThrownBy(() -> checkpointStore.recordToolUnknown(genId, toolCallId, "unknown err", "worker-1", 1L))
+                .isInstanceOf(StaleGenerationLeaseException.class)
+                .hasMessageContaining("rejected by fencing");
+
+        assertThatThrownBy(() -> checkpointStore.markToolFailed(genId, toolCallId, "fatal err", "worker-1", 1L))
+                .isInstanceOf(StaleGenerationLeaseException.class)
+                .hasMessageContaining("rejected by fencing");
+
+        assertThatThrownBy(() -> checkpointStore.recordToolFailed(genId, toolCallId, "fatal err", "worker-1", 1L))
+                .isInstanceOf(StaleGenerationLeaseException.class)
+                .hasMessageContaining("rejected by fencing");
+
+        assertThatThrownBy(() -> checkpointStore.assertActiveLease(genId, "worker-1", 1L))
+                .isInstanceOf(StaleGenerationLeaseException.class)
+                .hasMessageContaining("rejected by fencing");
+
+        // 3. Stale worker-1 attempts to run JMindOps -> MUST NOT invoke tool callback!
+        ToolCallback mockTool = mock(ToolCallback.class);
+        ToolDefinition toolDef = mock(ToolDefinition.class);
+        when(toolDef.name()).thenReturn("paymentTool");
+        when(mockTool.getToolDefinition()).thenReturn(toolDef);
+
+        ChatClient mockChatClient = mock(ChatClient.class);
+
+        JMindOps staleRuntime = new JMindOps(
+                TEST_AGENT_ID, "test-agent", "", "", mockChatClient,
+                20, 0.0, 0.9, List.of(new UserMessage("execute payment")), List.of(mockTool), List.of(),
+                TEST_SESSION_ID, genId, mock(ApplicationEventPublisher.class), null,
+                RoutingDecision.CHAT, "execute payment",
+                AgentExecutionPolicy.plan(RoutingDecision.CHAT, "execute payment"),
+                Duration.ofSeconds(60), checkpointStore, new ToolIdempotencyResolver(),
+                "worker-1", 1L
+        );
+
+        assertThatThrownBy(staleRuntime::run)
+                .isInstanceOf(StaleGenerationLeaseException.class);
+
+        // Tool callback was NEVER invoked because fencing rejected execution before tool call!
+        verify(mockTool, never()).call(any());
+        verify(mockTool, never()).call(any(), any());
+
+        // In PostgreSQL database, tool execution remains PREPARED, not mutated by stale worker
+        AgentToolExecution currentStatus = checkpointStore.findToolExecution(genId, toolCallId).orElseThrow();
+        assertThat(currentStatus.status()).isEqualTo(AgentToolExecution.Status.PREPARED);
+        assertThat(currentStatus.result()).isNull();
     }
 }

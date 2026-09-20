@@ -6,6 +6,7 @@ import com.kama.jmindops.agent.checkpoint.CheckpointPayload;
 import com.kama.jmindops.agent.tools.ToolIdempotencyResolver;
 import com.kama.jmindops.event.AgentMessageGeneratedEvent;
 import com.kama.jmindops.exception.NonIdempotentToolReplayException;
+import com.kama.jmindops.exception.StaleGenerationLeaseException;
 import com.kama.jmindops.governance.ToolApprovalSignal;
 import com.kama.jmindops.governance.ToolExecutionContext;
 import com.kama.jmindops.model.dto.KnowledgeBaseDTO;
@@ -491,13 +492,16 @@ public class JMindOps {
                             }
                         }
                     }
-                    checkpointStore.markToolExecuting(this.generationId, toolCallId);
+                    checkpointStore.markToolExecuting(this.generationId, toolCallId, this.workerId, this.leaseVersion);
                 }
 
                 ToolCallback callback = findCallback(toolName);
                 String result;
                 try {
                     if (callback != null) {
+                        if (checkpointStore != null) {
+                            checkpointStore.assertActiveLease(this.generationId, this.workerId, this.leaseVersion);
+                        }
                         org.springframework.ai.chat.model.ToolContext toolContext =
                                 new org.springframework.ai.chat.model.ToolContext(Map.of(
                                         "tool_call_id", toolCallId,
@@ -509,15 +513,22 @@ public class JMindOps {
                         result = "错误：未找到可用的工具「" + toolName + "」";
                     }
                 } catch (Exception e) {
+                    if (e instanceof StaleGenerationLeaseException) {
+                        throw (StaleGenerationLeaseException) e;
+                    }
                     if (checkpointStore != null) {
                         boolean idempotent = toolIdempotencyResolver != null
                                 && toolIdempotencyResolver.isIdempotent(toolName, callback);
-                        if (!idempotent) {
-                            log.warn("Non-idempotent tool execution threw exception, recording status as UNKNOWN: generationId={}, toolCallId={}, tool={}",
-                                    this.generationId, toolCallId, toolName, e);
-                            checkpointStore.markToolUnknown(this.generationId, toolCallId, e.getMessage());
-                        } else {
-                            checkpointStore.markToolFailed(this.generationId, toolCallId, e.getMessage());
+                        try {
+                            if (!idempotent) {
+                                log.warn("Non-idempotent tool execution threw exception, recording status as UNKNOWN: generationId={}, toolCallId={}, tool={}",
+                                        this.generationId, toolCallId, toolName, e);
+                                checkpointStore.markToolUnknown(this.generationId, toolCallId, e.getMessage(), this.workerId, this.leaseVersion);
+                            } else {
+                                checkpointStore.markToolFailed(this.generationId, toolCallId, e.getMessage(), this.workerId, this.leaseVersion);
+                            }
+                        } catch (StaleGenerationLeaseException staleEx) {
+                            throw staleEx;
                         }
                     }
                     throw e;
@@ -528,7 +539,7 @@ public class JMindOps {
                 // 2. 检查是否触发审批
                 if (ToolApprovalSignal.isWaitingResponse(result)) {
                     if (checkpointStore != null) {
-                        checkpointStore.markToolWaitingApproval(this.generationId, toolCallId, result);
+                        checkpointStore.markToolWaitingApproval(this.generationId, toolCallId, result, this.workerId, this.leaseVersion);
                         this.checkpointVersion++;
                         commitCheckpoint(stepNo, AgentCheckpoint.Stage.WAITING_APPROVAL,
                                 GenerationTask.Status.WAITING_APPROVAL, toolCalls, responses);
@@ -545,7 +556,7 @@ public class JMindOps {
                 }
 
                 if (checkpointStore != null) {
-                    checkpointStore.markToolSucceeded(this.generationId, toolCallId, result);
+                    checkpointStore.markToolSucceeded(this.generationId, toolCallId, result, this.workerId, this.leaseVersion);
                 }
                 if (KNOWLEDGE_TOOL_NAME.equals(toolName)) {
                     this.requiredKnowledgeRetrievalCompleted = true;
@@ -659,7 +670,7 @@ public class JMindOps {
                     for (AssistantMessage.ToolCall call : toolCalls) {
                         boolean isIdempotent = toolIdempotencyResolver != null
                                 && toolIdempotencyResolver.isIdempotent(call.name(), findCallback(call.name()));
-                        this.checkpointStore.recordPreparedToolCall(this.generationId, stepNo, call, isIdempotent);
+                        this.checkpointStore.recordPreparedToolCall(this.generationId, stepNo, call, isIdempotent, this.workerId, this.leaseVersion);
                     }
                     this.checkpointVersion++;
                     commitCheckpoint(stepNo, AgentCheckpoint.Stage.MODEL_OUTPUT, GenerationTask.Status.RUNNING,
@@ -695,6 +706,9 @@ public class JMindOps {
                 }
             }
         } catch (RuntimeException exception) {
+            if (exception instanceof StaleGenerationLeaseException) {
+                throw exception;
+            }
             if (this.agentTraceStore != null && stepTraceId != null) {
                 try {
                     this.agentTraceStore.failStep(
@@ -812,7 +826,7 @@ public class JMindOps {
 
             // Checkpoint boundary 1
             if (this.checkpointStore != null) {
-                this.checkpointStore.recordPreparedToolCall(this.generationId, stepNo, toolCall, true);
+                this.checkpointStore.recordPreparedToolCall(this.generationId, stepNo, toolCall, true, this.workerId, this.leaseVersion);
                 this.checkpointVersion++;
                 commitCheckpoint(stepNo, AgentCheckpoint.Stage.MODEL_OUTPUT, GenerationTask.Status.RUNNING,
                         List.of(toolCall), null);
@@ -828,13 +842,26 @@ public class JMindOps {
             ToolExecutionContext.set(this.chatSessionId, this.generationId, allowedKnowledgeBaseIds);
             try {
                 if (this.checkpointStore != null) {
-                    this.checkpointStore.markToolExecuting(this.generationId, toolCallId);
+                    this.checkpointStore.markToolExecuting(this.generationId, toolCallId, this.workerId, this.leaseVersion);
+                    this.checkpointStore.assertActiveLease(this.generationId, this.workerId, this.leaseVersion);
                 }
                 responseData = knowledgeCallback.call(arguments);
                 responseData = responseData == null ? "" : responseData;
                 if (this.checkpointStore != null) {
-                    this.checkpointStore.markToolSucceeded(this.generationId, toolCallId, responseData);
+                    this.checkpointStore.markToolSucceeded(this.generationId, toolCallId, responseData, this.workerId, this.leaseVersion);
                 }
+            } catch (Exception e) {
+                if (e instanceof StaleGenerationLeaseException) {
+                    throw (StaleGenerationLeaseException) e;
+                }
+                if (this.checkpointStore != null) {
+                    try {
+                        this.checkpointStore.markToolFailed(this.generationId, toolCallId, e.getMessage(), this.workerId, this.leaseVersion);
+                    } catch (StaleGenerationLeaseException staleEx) {
+                        throw staleEx;
+                    }
+                }
+                throw e;
             } finally {
                 ToolExecutionContext.clear();
             }
@@ -864,6 +891,9 @@ public class JMindOps {
                         null, List.of(new ToolResponseMessage.ToolResponse(toolCallId, KNOWLEDGE_TOOL_NAME, responseData)));
             }
         } catch (RuntimeException exception) {
+            if (exception instanceof StaleGenerationLeaseException) {
+                throw exception;
+            }
             if (this.agentTraceStore != null && stepTraceId != null) {
                 this.agentTraceStore.failStep(
                         this.generationId, stepTraceId, exception.getMessage(), toolExecutionStarted);

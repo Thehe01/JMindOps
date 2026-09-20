@@ -74,17 +74,11 @@ public class ChatEventListener {
             try {
                 leaseVersion = generationTaskStore.claimForExecution(generationId, workerId);
             } catch (Exception e) {
-                leaseVersion = 0L;
+                log.warn("Ignoring generation whose task is no longer PENDING or could not be claimed: generationId={}, status={}, error={}",
+                        generationId, task.status(), e.getMessage());
+                return;
             }
-            if (leaseVersion <= 0L) {
-                // Fallback for mock environments or legacy callers
-                if (!generationTaskStore.markRunning(generationId, workerId) && !generationTaskStore.markRunning(generationId)) {
-                    log.warn("Ignoring generation whose task is no longer PENDING: generationId={}, status={}",
-                            generationId, task.status());
-                    return;
-                }
-                leaseVersion = 1L;
-            }
+            chatGenerationCoordinator.registerRunning(sessionId, generationId, workerId, leaseVersion);
             installExecutionSecurityContext(task);
 
             log.info("Received ChatEvent: sessionId={}, generationId={}, workerId={}, leaseVersion={}, inputLength={}",
@@ -115,17 +109,7 @@ public class ChatEventListener {
                         sessionId, generationId);
                 return;
             }
-            boolean succeeded = false;
-            try {
-                succeeded = generationTaskStore.markSucceeded(generationId, workerId, leaseVersion);
-            } catch (com.kama.jmindops.exception.StaleGenerationLeaseException staleEx) {
-                throw staleEx;
-            } catch (Exception e) {
-                succeeded = false;
-            }
-            if (!succeeded) {
-                succeeded = generationTaskStore.markSucceeded(generationId);
-            }
+            boolean succeeded = generationTaskStore.markSucceeded(generationId, workerId, leaseVersion);
             if (succeeded) {
                 sendTerminal(sessionId, generationId, SseMessage.Type.AI_DONE, "生成完成");
             } else {
@@ -136,11 +120,7 @@ public class ChatEventListener {
             log.error("Agent generation failed: sessionId={}, generationId={}", sessionId, generationId, e);
             if (!isStaleLease(e)) {
                 try {
-                    if (leaseVersion > 0) {
-                        generationTaskStore.markFailed(generationId, workerId, leaseVersion, e.getMessage());
-                    } else {
-                        generationTaskStore.markFailed(generationId, e.getMessage());
-                    }
+                    generationTaskStore.markFailed(generationId, workerId, leaseVersion, e.getMessage());
                 } catch (Exception persistenceError) {
                     log.error("Failed to persist generation failure: generationId={}", generationId, persistenceError);
                 }
@@ -158,10 +138,10 @@ public class ChatEventListener {
     }
 
     private void touchHeartbeatWithFencing(String generationId, String workerId, long leaseVersion) {
-        if (leaseVersion > 0) {
-            generationTaskStore.touchHeartbeat(generationId, workerId, leaseVersion);
-        } else {
-            generationTaskStore.touchHeartbeat(generationId);
+        boolean touched = generationTaskStore.touchHeartbeat(generationId, workerId, leaseVersion);
+        if (!touched) {
+            throw new com.kama.jmindops.exception.StaleGenerationLeaseException("Heartbeat rejected by fencing: generationId="
+                    + generationId + ", workerId=" + workerId + ", leaseVersion=" + leaseVersion);
         }
     }
 

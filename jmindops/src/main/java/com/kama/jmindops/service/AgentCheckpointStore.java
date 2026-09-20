@@ -137,6 +137,50 @@ public class AgentCheckpointStore {
         return list.stream().findFirst();
     }
 
+    /**
+     * 强租约校验：在工具执行或账本变更前，校验当前 worker 是否依然合法持有该 generation 的租约。
+     */
+    public void assertActiveLease(String generationId, String workerId, long leaseVersion) {
+        if (generationId == null) {
+            throw new IllegalArgumentException("generationId must not be null");
+        }
+        List<Integer> list = jdbcTemplate.query("""
+                SELECT 1 FROM generation_task
+                WHERE id = CAST(? AS uuid)
+                  AND status IN ('RUNNING', 'WAITING_APPROVAL')
+                  AND (worker_id = ? OR worker_id IS NULL)
+                  AND lease_version = ?
+                """, (rs, rowNum) -> 1, generationId, workerId, leaseVersion);
+        if (list.isEmpty()) {
+            throw new StaleGenerationLeaseException("Tool ledger mutation rejected by fencing: generationId="
+                    + generationId + ", workerId=" + workerId + ", leaseVersion=" + leaseVersion);
+        }
+    }
+
+    @Transactional
+    public void recordPreparedToolCall(
+            String generationId,
+            int stepNo,
+            AssistantMessage.ToolCall toolCall,
+            boolean isIdempotent,
+            String workerId,
+            long leaseVersion
+    ) {
+        assertActiveLease(generationId, workerId, leaseVersion);
+        recordPreparedToolCall(generationId, stepNo, toolCall, isIdempotent);
+    }
+
+    public void recordToolPrepared(
+            String generationId,
+            int stepNo,
+            AssistantMessage.ToolCall toolCall,
+            boolean isIdempotent,
+            String workerId,
+            long leaseVersion
+    ) {
+        recordPreparedToolCall(generationId, stepNo, toolCall, isIdempotent, workerId, leaseVersion);
+    }
+
     public void recordPreparedToolCall(
             String generationId,
             int stepNo,
@@ -185,6 +229,16 @@ public class AgentCheckpointStore {
                 """, TOOL_EXECUTION_ROW_MAPPER, generationId, stepNo);
     }
 
+    public void recordToolExecuting(String generationId, String toolCallId, String workerId, long leaseVersion) {
+        markToolExecuting(generationId, toolCallId, workerId, leaseVersion);
+    }
+
+    @Transactional
+    public void markToolExecuting(String generationId, String toolCallId, String workerId, long leaseVersion) {
+        assertActiveLease(generationId, workerId, leaseVersion);
+        markToolExecuting(generationId, toolCallId);
+    }
+
     public void markToolExecuting(String generationId, String toolCallId) {
         jdbcTemplate.update("""
                 UPDATE agent_tool_execution
@@ -208,12 +262,32 @@ public class AgentCheckpointStore {
         return !list.isEmpty();
     }
 
+    public void recordToolSucceeded(String generationId, String toolCallId, String result, String workerId, long leaseVersion) {
+        markToolSucceeded(generationId, toolCallId, result, workerId, leaseVersion);
+    }
+
+    @Transactional
+    public void markToolSucceeded(String generationId, String toolCallId, String result, String workerId, long leaseVersion) {
+        assertActiveLease(generationId, workerId, leaseVersion);
+        markToolSucceeded(generationId, toolCallId, result);
+    }
+
     public void markToolSucceeded(String generationId, String toolCallId, String result) {
         jdbcTemplate.update("""
                 UPDATE agent_tool_execution
                 SET status = 'SUCCEEDED', result = ?, completed_at = NOW(), updated_at = NOW()
                 WHERE generation_id = CAST(? AS uuid) AND tool_call_id = ?
                 """, result, generationId, toolCallId);
+    }
+
+    public void recordToolWaitingApproval(String generationId, String toolCallId, String result, String workerId, long leaseVersion) {
+        markToolWaitingApproval(generationId, toolCallId, result, workerId, leaseVersion);
+    }
+
+    @Transactional
+    public void markToolWaitingApproval(String generationId, String toolCallId, String result, String workerId, long leaseVersion) {
+        assertActiveLease(generationId, workerId, leaseVersion);
+        markToolWaitingApproval(generationId, toolCallId, result);
     }
 
     public void markToolWaitingApproval(String generationId, String toolCallId, String result) {
@@ -224,12 +298,32 @@ public class AgentCheckpointStore {
                 """, result, generationId, toolCallId);
     }
 
+    public void recordToolUnknown(String generationId, String toolCallId, String error, String workerId, long leaseVersion) {
+        markToolUnknown(generationId, toolCallId, error, workerId, leaseVersion);
+    }
+
+    @Transactional
+    public void markToolUnknown(String generationId, String toolCallId, String error, String workerId, long leaseVersion) {
+        assertActiveLease(generationId, workerId, leaseVersion);
+        markToolUnknown(generationId, toolCallId, error);
+    }
+
     public void markToolUnknown(String generationId, String toolCallId, String error) {
         jdbcTemplate.update("""
                 UPDATE agent_tool_execution
                 SET status = 'UNKNOWN', error_message = ?, updated_at = NOW()
                 WHERE generation_id = CAST(? AS uuid) AND tool_call_id = ?
                 """, error, generationId, toolCallId);
+    }
+
+    public void recordToolFailed(String generationId, String toolCallId, String error, String workerId, long leaseVersion) {
+        markToolFailed(generationId, toolCallId, error, workerId, leaseVersion);
+    }
+
+    @Transactional
+    public void markToolFailed(String generationId, String toolCallId, String error, String workerId, long leaseVersion) {
+        assertActiveLease(generationId, workerId, leaseVersion);
+        markToolFailed(generationId, toolCallId, error);
     }
 
     public void markToolFailed(String generationId, String toolCallId, String error) {

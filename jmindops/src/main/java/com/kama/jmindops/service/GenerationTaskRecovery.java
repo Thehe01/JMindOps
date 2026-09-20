@@ -72,11 +72,25 @@ public class GenerationTaskRecovery {
     }
 
     private void heartbeatLocallyOwnedTasks() {
-        Map<String, String> running = chatGenerationCoordinator.runningGenerationsSnapshot();
-        if (running == null || running.isEmpty()) {
+        Map<String, ChatGenerationCoordinator.RunningExecution> executions =
+                chatGenerationCoordinator.runningExecutionsSnapshot();
+        if (executions == null || executions.isEmpty()) {
             return;
         }
-        running.values().forEach(generationTaskStore::touchHeartbeat);
+
+        for (ChatGenerationCoordinator.RunningExecution exec : executions.values()) {
+            if (exec.leaseVersion() > 0 && exec.workerId() != null) {
+                boolean touched = generationTaskStore.touchHeartbeat(
+                        exec.generationId(), exec.workerId(), exec.leaseVersion());
+                if (!touched) {
+                    log.warn("Heartbeat fencing rejected locally owned generation: sessionId={}, generationId={}, workerId={}, leaseVersion={}",
+                            exec.sessionId(), exec.generationId(), exec.workerId(), exec.leaseVersion());
+                }
+            } else {
+                log.warn("Locally owned generation has invalid lease info, skipping heartbeat: sessionId={}, generationId={}, workerId={}, leaseVersion={}",
+                        exec.sessionId(), exec.generationId(), exec.workerId(), exec.leaseVersion());
+            }
+        }
     }
 
     private void recoverPendingTasks() {

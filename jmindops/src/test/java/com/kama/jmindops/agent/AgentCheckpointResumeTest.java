@@ -653,8 +653,85 @@ class AgentCheckpointResumeTest {
                 .hasRootCauseMessage("Connection reset by peer");
 
         // Status MUST be recorded as UNKNOWN for non-idempotent tool!
-        verify(checkpointStore).markToolUnknown(eq(generationId), eq("tc-risk"), eq("Connection reset by peer"));
-        verify(checkpointStore, never()).markToolFailed(eq(generationId), eq("tc-risk"), anyString());
+        verify(checkpointStore).markToolUnknown(eq(generationId), eq("tc-risk"), eq("Connection reset by peer"), eq("worker-1"), eq(1L));
+        verify(checkpointStore, never()).markToolFailed(eq(generationId), eq("tc-risk"), anyString(), anyString(), anyLong());
+    }
+
+    /**
+     * 13. 场景 M：在执行工具前强制 lease fencing 检查发现租约过期，直接抛出 StaleGenerationLeaseException，
+     * 工具回调绝不被执行。
+     */
+    @Test
+    void staleWorkerCannotInvokeToolBeforeCallback() {
+        String generationId = "gen-stale-tool-inv";
+        String sessionId = "session-stale-tool";
+        AgentCheckpointStore checkpointStore = mock(AgentCheckpointStore.class);
+        ToolIdempotencyResolver idempotencyResolver = mock(ToolIdempotencyResolver.class);
+
+        ToolCallback riskyTool = mockToolCallback("riskyTool", "result");
+
+        List<AssistantMessage.ToolCall> pendingCalls = List.of(
+                new AssistantMessage.ToolCall("tc-risky", "function", "riskyTool", "{\"data\":1}")
+        );
+        String pendingCallsJson = CheckpointPayload.serializeToolCalls(pendingCalls);
+        List<Message> initialMessages = List.of(new UserMessage("Run risky tool"));
+        String messagesPayload = CheckpointPayload.serializeMessages(initialMessages);
+        CheckpointPayload.CheckpointRuntimeState runtimeState = new CheckpointPayload.CheckpointRuntimeState(
+                RoutingDecision.CHAT.name(), List.of(), 0, null, false, 0, 100L, 1, 0
+        );
+        String runtimeStateJson = CheckpointPayload.serializeRuntimeState(runtimeState);
+
+        AgentCheckpoint modelOutputCheckpoint = new AgentCheckpoint(
+                UUID.randomUUID().toString(),
+                generationId,
+                1,
+                1L,
+                AgentCheckpoint.Stage.MODEL_OUTPUT,
+                GenerationTask.Status.RUNNING,
+                messagesPayload,
+                runtimeStateJson,
+                pendingCallsJson,
+                null,
+                null,
+                null
+        );
+
+        when(checkpointStore.findLatestCheckpoint(generationId)).thenReturn(Optional.of(modelOutputCheckpoint));
+        when(checkpointStore.findToolExecution(generationId, "tc-risky")).thenReturn(Optional.empty());
+
+        // Lease check fails right before tool execution
+        org.mockito.Mockito.doThrow(new StaleGenerationLeaseException("Fenced out before tool execution"))
+                .when(checkpointStore).assertActiveLease(eq(generationId), eq("stale-worker"), eq(1L));
+
+        ChatClient chatClient = mock(ChatClient.class);
+
+        JMindOps runtime = new JMindOps(
+                "agent-1", "test-agent", "", "", chatClient,
+                20, 0.0, 0.9,
+                initialMessages,
+                List.of(riskyTool),
+                List.of(),
+                sessionId,
+                generationId,
+                mock(ApplicationEventPublisher.class),
+                null,
+                RoutingDecision.CHAT,
+                "Run risky tool",
+                AgentExecutionPolicy.plan(RoutingDecision.CHAT, "Run risky tool"),
+                Duration.ofSeconds(60),
+                checkpointStore,
+                idempotencyResolver,
+                "stale-worker",
+                1L
+        );
+
+        assertThatThrownBy(runtime::run)
+                .isInstanceOf(StaleGenerationLeaseException.class)
+                .hasMessageContaining("Fenced out before tool execution");
+
+        // Tool callback was NEVER invoked
+        verify(riskyTool, never()).call(any());
+        verify(riskyTool, never()).call(any(), any());
     }
 
     /**

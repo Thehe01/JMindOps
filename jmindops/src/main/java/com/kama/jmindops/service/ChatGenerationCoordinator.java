@@ -247,6 +247,20 @@ public class ChatGenerationCoordinator {
         return false;
     }
 
+    public record RunningExecution(String sessionId, String generationId, String workerId, long leaseVersion) {}
+
+    private final ConcurrentMap<String, RunningExecution> runningExecutions = new ConcurrentHashMap<>();
+
+    public void registerRunning(String sessionId, String generationId, String workerId, long leaseVersion) {
+        if (sessionId != null && generationId != null && workerId != null) {
+            runningExecutions.put(sessionId, new RunningExecution(sessionId, generationId, workerId, leaseVersion));
+        }
+    }
+
+    public Map<String, RunningExecution> runningExecutionsSnapshot() {
+        return Map.copyOf(runningExecutions);
+    }
+
     /**
      * Returns only generations currently owned as RUNNING by this application instance.
      * The persistent task heartbeat uses this snapshot to distinguish a slow model call
@@ -263,6 +277,7 @@ public class ChatGenerationCoordinator {
     }
 
     public void release(String sessionId, String generationId) {
+        runningExecutions.remove(sessionId);
         String expectedReserved = RESERVED + generationId;
         String expectedRunning = RUNNING + generationId;
 

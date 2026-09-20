@@ -56,19 +56,57 @@ class ChatEventListenerTest {
 
         when(taskStore.findExecutionTask("generation-1")).thenReturn(Optional.of(pendingTask()));
         when(coordinator.claim("session-1", "generation-1")).thenReturn(true);
-        when(taskStore.markRunning("generation-1")).thenReturn(true);
+        when(taskStore.claimForExecution(org.mockito.ArgumentMatchers.eq("generation-1"), org.mockito.ArgumentMatchers.anyString())).thenReturn(1L);
+        when(taskStore.touchHeartbeat(org.mockito.ArgumentMatchers.eq("generation-1"), org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.eq(1L))).thenReturn(true);
         when(routerAgent.rewrite("session-1", "hello")).thenReturn("rewritten");
         when(routerAgent.route("rewritten")).thenReturn(RoutingDecision.CHAT);
-        when(factory.create("agent-1", "session-1", RoutingDecision.CHAT, "generation-1", "rewritten")).thenReturn(runtime);
-        when(taskStore.markSucceeded("generation-1")).thenReturn(true);
+        when(factory.create(
+                org.mockito.ArgumentMatchers.eq("agent-1"),
+                org.mockito.ArgumentMatchers.eq("session-1"),
+                org.mockito.ArgumentMatchers.eq(RoutingDecision.CHAT),
+                org.mockito.ArgumentMatchers.eq("generation-1"),
+                org.mockito.ArgumentMatchers.eq("rewritten"),
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.eq(1L)
+        )).thenReturn(runtime);
+        when(taskStore.markSucceeded(org.mockito.ArgumentMatchers.eq("generation-1"), org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.eq(1L))).thenReturn(true);
 
         listener.handle(event);
 
         verify(runtime).run();
-        verify(taskStore).markRunning("generation-1");
-        verify(taskStore).markSucceeded("generation-1");
+        verify(taskStore).claimForExecution(org.mockito.ArgumentMatchers.eq("generation-1"), org.mockito.ArgumentMatchers.anyString());
+        verify(taskStore).markSucceeded(org.mockito.ArgumentMatchers.eq("generation-1"), org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.eq(1L));
+        verify(taskStore, never()).markRunning(org.mockito.ArgumentMatchers.anyString());
+        verify(taskStore, never()).markSucceeded(org.mockito.ArgumentMatchers.anyString());
+        verify(coordinator).registerRunning(org.mockito.ArgumentMatchers.eq("session-1"), org.mockito.ArgumentMatchers.eq("generation-1"), org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.eq(1L));
         verify(traceStore).recordRouting("generation-1", "CHAT");
         verify(sseService).send(org.mockito.ArgumentMatchers.eq("session-1"), any());
+        verify(coordinator).release("session-1", "generation-1");
+    }
+
+    @Test
+    void staleHeartbeatThrowsExceptionAndSkipsMarkFailed() {
+        JMindOpsFactory factory = mock(JMindOpsFactory.class);
+        RouterAgent routerAgent = mock(RouterAgent.class);
+        SseService sseService = mock(SseService.class);
+        ChatGenerationCoordinator coordinator = mock(ChatGenerationCoordinator.class);
+        GenerationTaskStore taskStore = mock(GenerationTaskStore.class);
+        AgentTraceStore traceStore = mock(AgentTraceStore.class);
+        ChatEventListener listener = new ChatEventListener(factory, routerAgent, sseService, coordinator, taskStore, traceStore);
+        ChatEvent event = new ChatEvent("agent-1", "session-1", "hello", "generation-1");
+
+        when(taskStore.findExecutionTask("generation-1")).thenReturn(Optional.of(pendingTask()));
+        when(coordinator.claim("session-1", "generation-1")).thenReturn(true);
+        when(taskStore.claimForExecution(org.mockito.ArgumentMatchers.eq("generation-1"), org.mockito.ArgumentMatchers.anyString())).thenReturn(1L);
+        // Heartbeat rejected by fencing (lease taken over or bumped)
+        when(taskStore.touchHeartbeat(org.mockito.ArgumentMatchers.eq("generation-1"), org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.eq(1L))).thenReturn(false);
+        when(routerAgent.rewrite("session-1", "hello")).thenReturn("rewritten");
+
+        listener.handle(event);
+
+        // markFailed must be skipped for stale worker!
+        verify(taskStore, never()).markFailed(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyString());
+        verify(taskStore, never()).markFailed(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString());
         verify(coordinator).release("session-1", "generation-1");
     }
 

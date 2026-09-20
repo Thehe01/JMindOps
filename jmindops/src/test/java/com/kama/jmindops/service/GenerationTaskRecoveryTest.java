@@ -49,14 +49,35 @@ class GenerationTaskRecoveryTest {
         SseService sseService = mock(SseService.class);
         GenerationTaskRecovery recovery = new GenerationTaskRecovery(
                 store, coordinator, publisher, sseService, 15, 600, 20);
-        when(coordinator.runningGenerationsSnapshot()).thenReturn(
-                java.util.Map.of("session-1", "generation-1"));
+        when(coordinator.runningExecutionsSnapshot()).thenReturn(
+                java.util.Map.of("session-1", new ChatGenerationCoordinator.RunningExecution("session-1", "generation-1", "worker-1", 1L)));
         when(store.findRecoverablePending(Duration.ofSeconds(15), 20)).thenReturn(List.of());
         when(store.claimStaleRunningForResume(anyString(), any(Duration.class), anyInt())).thenReturn(List.of());
 
         recovery.recover();
 
-        verify(store).touchHeartbeat("generation-1");
+        verify(store).touchHeartbeat("generation-1", "worker-1", 1L);
+        verify(store, never()).touchHeartbeat("generation-1");
+    }
+
+    @Test
+    void heartbeatsFencedWhenRunningExecutionsAvailable() {
+        GenerationTaskStore store = mock(GenerationTaskStore.class);
+        ChatGenerationCoordinator coordinator = mock(ChatGenerationCoordinator.class);
+        ApplicationEventPublisher publisher = mock(ApplicationEventPublisher.class);
+        SseService sseService = mock(SseService.class);
+        GenerationTaskRecovery recovery = new GenerationTaskRecovery(
+                store, coordinator, publisher, sseService, 15, 600, 20);
+        when(coordinator.runningExecutionsSnapshot()).thenReturn(java.util.Map.of(
+                "session-1", new ChatGenerationCoordinator.RunningExecution("session-1", "generation-1", "worker-1", 2L)
+        ));
+        when(store.findRecoverablePending(Duration.ofSeconds(15), 20)).thenReturn(List.of());
+        when(store.claimStaleRunningForResume(anyString(), any(Duration.class), anyInt())).thenReturn(List.of());
+
+        recovery.recover();
+
+        verify(store).touchHeartbeat("generation-1", "worker-1", 2L);
+        verify(store, never()).touchHeartbeat("generation-1");
     }
 
     @Test

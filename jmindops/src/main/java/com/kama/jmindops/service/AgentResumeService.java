@@ -59,6 +59,7 @@ public class AgentResumeService {
             claimed = true;
 
             newLeaseVersion = generationTaskStore.claimForResume(generationId, workerId);
+            chatGenerationCoordinator.registerRunning(sessionId, generationId, workerId, newLeaseVersion);
             runAgentWithFencing(task, workerId, newLeaseVersion);
         } catch (Exception e) {
             handleResumeException(sessionId, generationId, workerId, newLeaseVersion, e);
@@ -86,6 +87,7 @@ public class AgentResumeService {
             }
             claimed = true;
 
+            chatGenerationCoordinator.registerRunning(sessionId, generationId, workerId, leaseVersion);
             runAgentWithFencing(task, workerId, leaseVersion);
         } catch (Exception e) {
             handleResumeException(sessionId, generationId, workerId, leaseVersion, e);
