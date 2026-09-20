@@ -22,6 +22,7 @@ public class GenerationTaskRecovery {
     private final ChatGenerationCoordinator chatGenerationCoordinator;
     private final ApplicationEventPublisher publisher;
     private final SseService sseService;
+    private final AgentResumeService agentResumeService;
     private final Duration pendingRedispatchAfter;
     private final Duration runningTimeout;
     private final int batchSize;
@@ -35,10 +36,26 @@ public class GenerationTaskRecovery {
             @Value("${app.generation.running-timeout-seconds:3600}") long runningTimeoutSeconds,
             @Value("${app.generation.recovery-batch-size:20}") int batchSize
     ) {
+        this(generationTaskStore, chatGenerationCoordinator, publisher, sseService, null,
+                pendingRedispatchAfterSeconds, runningTimeoutSeconds, batchSize);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public GenerationTaskRecovery(
+            GenerationTaskStore generationTaskStore,
+            ChatGenerationCoordinator chatGenerationCoordinator,
+            ApplicationEventPublisher publisher,
+            SseService sseService,
+            @org.springframework.beans.factory.annotation.Autowired(required = false) AgentResumeService agentResumeService,
+            @Value("${app.generation.pending-redispatch-after-seconds:15}") long pendingRedispatchAfterSeconds,
+            @Value("${app.generation.running-timeout-seconds:3600}") long runningTimeoutSeconds,
+            @Value("${app.generation.recovery-batch-size:20}") int batchSize
+    ) {
         this.generationTaskStore = generationTaskStore;
         this.chatGenerationCoordinator = chatGenerationCoordinator;
         this.publisher = publisher;
         this.sseService = sseService;
+        this.agentResumeService = agentResumeService;
         this.pendingRedispatchAfter = Duration.ofSeconds(Math.max(5, pendingRedispatchAfterSeconds));
         this.runningTimeout = Duration.ofSeconds(Math.max(60, runningTimeoutSeconds));
         this.batchSize = Math.max(1, Math.min(batchSize, 100));
@@ -51,7 +68,7 @@ public class GenerationTaskRecovery {
     public void recover() {
         heartbeatLocallyOwnedTasks();
         recoverPendingTasks();
-        failStaleRunningTasks();
+        recoverStaleRunningTasks();
     }
 
     private void heartbeatLocallyOwnedTasks() {
@@ -84,22 +101,24 @@ public class GenerationTaskRecovery {
         }
     }
 
-    private void failStaleRunningTasks() {
-        List<GenerationTask> timedOut = generationTaskStore.failStaleRunning(runningTimeout, batchSize);
-        for (GenerationTask task : timedOut) {
-            chatGenerationCoordinator.release(task.sessionId(), task.id());
-            sseService.send(task.sessionId(), SseMessage.builder()
-                    .type(SseMessage.Type.AI_ERROR)
-                    .payload(SseMessage.Payload.builder()
-                            .statusText("任务执行超时，可安全重试")
-                            .done(true)
-                            .build())
-                    .metadata(SseMessage.Metadata.builder()
-                            .generationId(task.id())
-                            .build())
-                    .build());
-            log.warn("Marked stale generation as FAILED: sessionId={}, generationId={}",
-                    task.sessionId(), task.id());
+    private void recoverStaleRunningTasks() {
+        String recoveryWorkerId = "recovery-worker-" + java.util.UUID.randomUUID();
+        List<GenerationTask> staleTasks = generationTaskStore.claimStaleRunningForResume(
+                recoveryWorkerId, runningTimeout, batchSize);
+        for (GenerationTask task : staleTasks) {
+            log.info("Claimed stale RUNNING generation for resume: sessionId={}, generationId={}, workerId={}, leaseVersion={}",
+                    task.sessionId(), task.id(), task.workerId(), task.leaseVersion());
+            if (agentResumeService != null) {
+                java.util.concurrent.CompletableFuture.runAsync(() -> {
+                    try {
+                        agentResumeService.resumeClaimed(task);
+                    } catch (Exception e) {
+                        log.error("Failed to resume claimed stale generation: generationId={}", task.id(), e);
+                    }
+                });
+            } else {
+                log.warn("AgentResumeService not available to resume claimed task: generationId={}", task.id());
+            }
         }
     }
 }

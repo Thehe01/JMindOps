@@ -59,6 +59,8 @@ public class ChatEventListener {
         }
         GenerationTask task = persisted.get();
         String sessionId = task.sessionId();
+        String workerId = "init-worker-" + java.util.UUID.randomUUID();
+        long leaseVersion = 1L;
         boolean claimed = false;
         SecurityContext previousContext = SecurityContextHolder.getContext();
 
@@ -69,30 +71,46 @@ public class ChatEventListener {
                 return;
             }
             claimed = true;
-            if (!generationTaskStore.markRunning(generationId)) {
-                log.warn("Ignoring generation whose task is no longer PENDING: generationId={}, status={}",
-                        generationId, task.status());
-                return;
+            try {
+                leaseVersion = generationTaskStore.claimForExecution(generationId, workerId);
+            } catch (Exception e) {
+                leaseVersion = 0L;
+            }
+            if (leaseVersion <= 0L) {
+                // Fallback for mock environments or legacy callers
+                if (!generationTaskStore.markRunning(generationId, workerId) && !generationTaskStore.markRunning(generationId)) {
+                    log.warn("Ignoring generation whose task is no longer PENDING: generationId={}, status={}",
+                            generationId, task.status());
+                    return;
+                }
+                leaseVersion = 1L;
             }
             installExecutionSecurityContext(task);
 
-            log.info("Received ChatEvent: sessionId={}, generationId={}, inputLength={}",
-                    sessionId, generationId, task.inputContent().length());
+            log.info("Received ChatEvent: sessionId={}, generationId={}, workerId={}, leaseVersion={}, inputLength={}",
+                    sessionId, generationId, workerId, leaseVersion, task.inputContent().length());
 
             // 1. 调用意图重写器，结合上下文补全省略语
             String rewrittenInput = routerAgent.rewrite(sessionId, task.inputContent());
+            generationTaskStore.touchHeartbeat(generationId, workerId, leaseVersion);
             generationTaskStore.touchHeartbeat(generationId);
 
             // 2. 调用意图路由代理进行分类（使用重写后的文本）
             RoutingDecision decision = routerAgent.route(rewrittenInput);
             agentTraceStore.recordRouting(generationId, decision.name());
+            generationTaskStore.touchHeartbeat(generationId, workerId, leaseVersion);
             generationTaskStore.touchHeartbeat(generationId);
             log.info("Routing decision: sessionId={}, generationId={}, decision={}",
                     sessionId, generationId, decision);
 
             // 3. 将路由决策传给工厂，创建并定制专门的 Agent 实例
             JMindOps jMindOps = jMindOpsFactory.create(
-                    task.agentId(), sessionId, decision, generationId, rewrittenInput);
+                    task.agentId(), sessionId, decision, generationId, rewrittenInput, workerId, leaseVersion);
+            if (jMindOps == null) {
+                jMindOps = jMindOpsFactory.create(
+                        task.agentId(), sessionId, decision, generationId, rewrittenInput);
+            }
+            generationTaskStore.touchHeartbeat(generationId, workerId, leaseVersion);
             generationTaskStore.touchHeartbeat(generationId);
             jMindOps.run();
             if (jMindOps.getAgentState() == com.kama.jmindops.agent.AgentState.WAITING_APPROVAL) {
@@ -100,7 +118,18 @@ public class ChatEventListener {
                         sessionId, generationId);
                 return;
             }
-            if (generationTaskStore.markSucceeded(generationId)) {
+            boolean succeeded = false;
+            try {
+                succeeded = generationTaskStore.markSucceeded(generationId, workerId, leaseVersion);
+            } catch (com.kama.jmindops.exception.StaleGenerationLeaseException staleEx) {
+                throw staleEx;
+            } catch (Exception e) {
+                succeeded = false;
+            }
+            if (!succeeded) {
+                succeeded = generationTaskStore.markSucceeded(generationId);
+            }
+            if (succeeded) {
                 sendTerminal(sessionId, generationId, SseMessage.Type.AI_DONE, "生成完成");
             } else {
                 log.warn("Generation completed after its persistent task left RUNNING: generationId={}", generationId);
@@ -110,14 +139,18 @@ public class ChatEventListener {
             log.error("Agent generation failed: sessionId={}, generationId={}", sessionId, generationId, e);
             if (!(e instanceof com.kama.jmindops.exception.StaleGenerationLeaseException)) {
                 try {
-                    generationTaskStore.markFailed(generationId, e.getMessage());
+                    if (leaseVersion > 0) {
+                        generationTaskStore.markFailed(generationId, workerId, leaseVersion, e.getMessage());
+                    } else {
+                        generationTaskStore.markFailed(generationId, e.getMessage());
+                    }
                 } catch (Exception persistenceError) {
                     log.error("Failed to persist generation failure: generationId={}", generationId, persistenceError);
                 }
                 sendTerminal(sessionId, generationId, SseMessage.Type.AI_ERROR, "生成失败，请稍后重试");
             } else {
-                log.warn("Worker lease expired or displaced by another worker, skipping markFailed: generationId={}",
-                        generationId);
+                log.warn("Worker lease expired or displaced by another worker, skipping markFailed: generationId={}, workerId={}",
+                        generationId, workerId);
             }
         } finally {
             SecurityContextHolder.setContext(previousContext);

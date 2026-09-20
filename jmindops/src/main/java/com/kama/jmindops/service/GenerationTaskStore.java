@@ -138,17 +138,25 @@ public class GenerationTaskStore {
     }
 
     public long claimForResume(String generationId, String workerId) {
-        List<Long> versions = jdbcTemplate.query("""
+        return claimForResume(generationId, workerId, 0L);
+    }
+
+    public long claimForResume(String generationId, String workerId, long expectedLeaseVersion) {
+        String sql = """
                 UPDATE generation_task
                 SET status = 'RUNNING',
+                    attempt_count = attempt_count + 1,
                     worker_id = ?,
                     lease_version = lease_version + 1,
                     heartbeat_at = NOW(),
                     updated_at = NOW()
                 WHERE id = CAST(? AS uuid)
                   AND status IN ('RUNNING', 'WAITING_APPROVAL')
-                RETURNING lease_version
-                """, (rs, rowNum) -> rs.getLong("lease_version"), workerId, generationId);
+                """ + (expectedLeaseVersion > 0 ? "  AND lease_version = ?\n" : "")
+                + "RETURNING lease_version";
+        List<Long> versions = expectedLeaseVersion > 0
+                ? jdbcTemplate.query(sql, (rs, rowNum) -> rs.getLong("lease_version"), workerId, generationId, expectedLeaseVersion)
+                : jdbcTemplate.query(sql, (rs, rowNum) -> rs.getLong("lease_version"), workerId, generationId);
         if (versions.isEmpty()) {
             throw new IllegalStateException("Task cannot be claimed for resume: generationId=" + generationId);
         }
@@ -245,6 +253,39 @@ public class GenerationTaskStore {
                         ORDER BY gt.last_dispatched_at ASC
                         LIMIT ?
                         """, ROW_MAPPER, minimumAge.toSeconds(), limit);
+    }
+
+    public List<GenerationTask> claimStaleRunningForResume(String workerId, Duration timeout, int limit) {
+        return jdbcTemplate.query("""
+                WITH stale AS (
+                    SELECT id, lease_version
+                    FROM generation_task
+                    WHERE status = 'RUNNING'
+                      AND COALESCE(heartbeat_at, started_at, updated_at) < NOW() - (? * INTERVAL '1 second')
+                    ORDER BY COALESCE(heartbeat_at, started_at, updated_at) ASC
+                    LIMIT ?
+                    FOR UPDATE SKIP LOCKED
+                ), updated AS (
+                    UPDATE generation_task gt
+                    SET status = 'RUNNING',
+                        attempt_count = attempt_count + 1,
+                        worker_id = ?,
+                        lease_version = gt.lease_version + 1,
+                        heartbeat_at = NOW(),
+                        updated_at = NOW()
+                    FROM stale
+                    WHERE gt.id = stale.id AND gt.lease_version = stale.lease_version AND gt.status = 'RUNNING'
+                    RETURNING gt.*
+                )
+                SELECT updated.id, updated.parent_generation_id, updated.user_id, au.username, au.role,
+                       updated.request_id, updated.request_fingerprint, updated.agent_id, updated.session_id,
+                       updated.user_message_id, updated.input_content, updated.status, updated.attempt_count,
+                       updated.last_error, updated.last_dispatched_at, updated.heartbeat_at, updated.started_at,
+                       updated.completed_at, updated.created_at, updated.updated_at,
+                       updated.worker_id, updated.lease_version
+                FROM updated
+                JOIN app_user au ON au.id = updated.user_id
+                """, ROW_MAPPER, timeout.toSeconds(), limit, workerId);
     }
 
     public List<GenerationTask> failStaleRunning(Duration timeout, int limit) {

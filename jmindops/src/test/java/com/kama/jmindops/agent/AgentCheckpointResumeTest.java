@@ -580,6 +580,83 @@ class AgentCheckpointResumeTest {
         verify(dangerousTool, never()).call(anyString(), any());
     }
 
+    /**
+     * 11. 场景 K：非幂等工具在执行时抛出异常（网络超时/未知副作用），账本记录为 UNKNOWN 状态而非 FAILED。
+     */
+    @Test
+    void nonIdempotentToolExceptionRecordedAsUnknown() {
+        String generationId = "gen-tool-exception-unknown";
+        String sessionId = "session-k";
+        AgentCheckpointStore checkpointStore = mock(AgentCheckpointStore.class);
+        ToolIdempotencyResolver idempotencyResolver = mock(ToolIdempotencyResolver.class);
+
+        ToolCallback riskyTool = mock(ToolCallback.class);
+        ToolDefinition definition = mock(ToolDefinition.class);
+        when(definition.name()).thenReturn("riskyTool");
+        when(riskyTool.getToolDefinition()).thenReturn(definition);
+        when(riskyTool.call(any(), any())).thenThrow(new RuntimeException("Connection reset by peer"));
+        when(idempotencyResolver.isIdempotent(eq("riskyTool"), any())).thenReturn(false);
+
+        List<AssistantMessage.ToolCall> pendingCalls = List.of(
+                new AssistantMessage.ToolCall("tc-risk", "function", "riskyTool", "{\"data\":1}")
+        );
+        String pendingCallsJson = CheckpointPayload.serializeToolCalls(pendingCalls);
+        List<Message> initialMessages = List.of(new UserMessage("Run risky tool"));
+        String messagesPayload = CheckpointPayload.serializeMessages(initialMessages);
+        CheckpointPayload.CheckpointRuntimeState runtimeState = new CheckpointPayload.CheckpointRuntimeState(
+                RoutingDecision.CHAT.name(), List.of(), 0, null, false, 0, 100L, 1, 0
+        );
+        String runtimeStateJson = CheckpointPayload.serializeRuntimeState(runtimeState);
+
+        AgentCheckpoint modelOutputCheckpoint = new AgentCheckpoint(
+                UUID.randomUUID().toString(),
+                generationId,
+                1,
+                1L,
+                AgentCheckpoint.Stage.MODEL_OUTPUT,
+                GenerationTask.Status.RUNNING,
+                messagesPayload,
+                runtimeStateJson,
+                pendingCallsJson,
+                null,
+                null,
+                null
+        );
+
+        when(checkpointStore.findLatestCheckpoint(generationId)).thenReturn(Optional.of(modelOutputCheckpoint));
+        when(checkpointStore.findToolExecution(generationId, "tc-risk")).thenReturn(Optional.empty());
+
+        ChatClient chatClient = mock(ChatClient.class);
+
+        JMindOps runtime = new JMindOps(
+                "agent-1", "test-agent", "", "", chatClient,
+                20, 0.0, 0.9,
+                initialMessages,
+                List.of(riskyTool),
+                List.of(),
+                sessionId,
+                generationId,
+                mock(ApplicationEventPublisher.class),
+                null,
+                RoutingDecision.CHAT,
+                "Run risky tool",
+                AgentExecutionPolicy.plan(RoutingDecision.CHAT, "Run risky tool"),
+                Duration.ofSeconds(60),
+                checkpointStore,
+                idempotencyResolver,
+                "worker-1",
+                1L
+        );
+
+        assertThatThrownBy(runtime::run)
+                .isInstanceOf(RuntimeException.class)
+                .hasRootCauseMessage("Connection reset by peer");
+
+        // Status MUST be recorded as UNKNOWN for non-idempotent tool!
+        verify(checkpointStore).markToolUnknown(eq(generationId), eq("tc-risk"), eq("Connection reset by peer"));
+        verify(checkpointStore, never()).markToolFailed(eq(generationId), eq("tc-risk"), anyString());
+    }
+
     private ChatClient mockChatClientWithFinalAnswer(String answer) {
         ChatClient chatClient = mock(ChatClient.class);
         ChatClient.ChatClientRequestSpec requestSpec = mock(ChatClient.ChatClientRequestSpec.class);

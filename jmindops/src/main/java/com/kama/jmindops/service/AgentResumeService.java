@@ -59,44 +59,81 @@ public class AgentResumeService {
             claimed = true;
 
             newLeaseVersion = generationTaskStore.claimForResume(generationId, workerId);
-            installExecutionSecurityContext(task);
-
-            log.info("开始从 Checkpoint 恢复执行 Generation: sessionId={}, generationId={}, workerId={}, leaseVersion={}",
-                    sessionId, generationId, workerId, newLeaseVersion);
-
-            JMindOps jMindOps = jMindOpsFactory.createForResume(task, workerId, newLeaseVersion);
-            jMindOps.run();
-
-            if (jMindOps.getAgentState() == AgentState.WAITING_APPROVAL) {
-                log.info("恢复执行的 Generation 再次进入审批挂起状态: generationId={}", generationId);
-            } else if (jMindOps.getAgentState() == AgentState.FINISHED) {
-                if (generationTaskStore.markSucceeded(generationId, workerId, newLeaseVersion)) {
-                    sendTerminal(sessionId, generationId, SseMessage.Type.AI_DONE, "生成完成");
-                }
-            }
+            runAgentWithFencing(task, workerId, newLeaseVersion);
         } catch (Exception e) {
-            log.error("恢复 Agent 生成失败: sessionId={}, generationId={}", sessionId, generationId, e);
-            if (!(e instanceof com.kama.jmindops.exception.StaleGenerationLeaseException)) {
-                try {
-                    if (newLeaseVersion > 0) {
-                        generationTaskStore.markFailed(generationId, workerId, newLeaseVersion, e.getMessage());
-                    } else {
-                        generationTaskStore.markFailed(generationId, e.getMessage());
-                    }
-                } catch (Exception persistenceError) {
-                    log.error("Failed to persist generation failure: generationId={}", generationId, persistenceError);
-                }
-                sendTerminal(sessionId, generationId, SseMessage.Type.AI_ERROR, "生成恢复失败，请稍后重试");
-            } else {
-                log.warn("Worker lease expired or displaced by another worker, skipping markFailed: generationId={}, workerId={}",
-                        generationId, workerId);
-            }
+            handleResumeException(sessionId, generationId, workerId, newLeaseVersion, e);
             throw e;
         } finally {
             SecurityContextHolder.setContext(previousContext);
             if (claimed) {
                 chatGenerationCoordinator.release(sessionId, generationId);
             }
+        }
+    }
+
+    public void resumeClaimed(GenerationTask task) {
+        String sessionId = task.sessionId();
+        String generationId = task.id();
+        String workerId = task.workerId();
+        long leaseVersion = task.leaseVersion();
+        boolean claimed = false;
+        SecurityContext previousContext = SecurityContextHolder.getContext();
+
+        try {
+            if (!chatGenerationCoordinator.claimForResume(sessionId, generationId)) {
+                log.warn("无法获得协调锁以恢复已认领生成: sessionId={}, generationId={}", sessionId, generationId);
+                return;
+            }
+            claimed = true;
+
+            runAgentWithFencing(task, workerId, leaseVersion);
+        } catch (Exception e) {
+            handleResumeException(sessionId, generationId, workerId, leaseVersion, e);
+            throw e;
+        } finally {
+            SecurityContextHolder.setContext(previousContext);
+            if (claimed) {
+                chatGenerationCoordinator.release(sessionId, generationId);
+            }
+        }
+    }
+
+    private void runAgentWithFencing(GenerationTask task, String workerId, long leaseVersion) {
+        installExecutionSecurityContext(task);
+        String sessionId = task.sessionId();
+        String generationId = task.id();
+
+        log.info("开始从 Checkpoint 恢复执行 Generation: sessionId={}, generationId={}, workerId={}, leaseVersion={}",
+                sessionId, generationId, workerId, leaseVersion);
+
+        JMindOps jMindOps = jMindOpsFactory.createForResume(task, workerId, leaseVersion);
+        jMindOps.run();
+
+        if (jMindOps.getAgentState() == AgentState.WAITING_APPROVAL) {
+            log.info("恢复执行的 Generation 再次进入审批挂起状态: generationId={}", generationId);
+        } else if (jMindOps.getAgentState() == AgentState.FINISHED) {
+            if (generationTaskStore.markSucceeded(generationId, workerId, leaseVersion)) {
+                sendTerminal(sessionId, generationId, SseMessage.Type.AI_DONE, "生成完成");
+            }
+        }
+    }
+
+    private void handleResumeException(String sessionId, String generationId, String workerId, long leaseVersion, Exception e) {
+        log.error("恢复 Agent 生成失败: sessionId={}, generationId={}", sessionId, generationId, e);
+        if (!(e instanceof com.kama.jmindops.exception.StaleGenerationLeaseException)) {
+            try {
+                if (leaseVersion > 0) {
+                    generationTaskStore.markFailed(generationId, workerId, leaseVersion, e.getMessage());
+                } else {
+                    generationTaskStore.markFailed(generationId, e.getMessage());
+                }
+            } catch (Exception persistenceError) {
+                log.error("Failed to persist generation failure: generationId={}", generationId, persistenceError);
+            }
+            sendTerminal(sessionId, generationId, SseMessage.Type.AI_ERROR, "生成恢复失败，请稍后重试");
+        } else {
+            log.warn("Worker lease expired or displaced by another worker, skipping markFailed: generationId={}, workerId={}",
+                    generationId, workerId);
         }
     }
 

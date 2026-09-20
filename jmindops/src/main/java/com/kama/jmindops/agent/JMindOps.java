@@ -510,7 +510,15 @@ public class JMindOps {
                     }
                 } catch (Exception e) {
                     if (checkpointStore != null) {
-                        checkpointStore.markToolFailed(this.generationId, toolCallId, e.getMessage());
+                        boolean idempotent = toolIdempotencyResolver != null
+                                && toolIdempotencyResolver.isIdempotent(toolName, callback);
+                        if (!idempotent) {
+                            log.warn("Non-idempotent tool execution threw exception, recording status as UNKNOWN: generationId={}, toolCallId={}, tool={}",
+                                    this.generationId, toolCallId, toolName, e);
+                            checkpointStore.markToolUnknown(this.generationId, toolCallId, e.getMessage());
+                        } else {
+                            checkpointStore.markToolFailed(this.generationId, toolCallId, e.getMessage());
+                        }
                     }
                     throw e;
                 }

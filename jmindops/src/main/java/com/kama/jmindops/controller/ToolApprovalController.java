@@ -9,6 +9,8 @@ import com.kama.jmindops.security.ResourceAccessService;
 import com.kama.jmindops.service.AgentResumeService;
 import com.kama.jmindops.service.ChatMessageFacadeService;
 import com.kama.jmindops.service.GenerationTaskStore;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -17,14 +19,19 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 
 @RestController
 @RequestMapping("/api/tool-approvals")
 public class ToolApprovalController {
+    private static final Logger log = LoggerFactory.getLogger(ToolApprovalController.class);
+
     private final ToolGovernanceService toolGovernanceService;
     private final ChatMessageFacadeService chatMessageFacadeService;
     private final ResourceAccessService resourceAccessService;
@@ -76,8 +83,25 @@ public class ToolApprovalController {
         }
 
         if (waitingTask.isPresent() && agentResumeService != null) {
-            // HITL: Resume the exact same generation from checkpoint!
-            agentResumeService.resume(waitingTask.get().id());
+            String targetGenerationId = waitingTask.get().id();
+            if (TransactionSynchronizationManager.isSynchronizationActive()) {
+                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        log.info("Tool approval committed, triggering async agent resume: generationId={}", targetGenerationId);
+                        CompletableFuture.runAsync(() -> {
+                            try {
+                                agentResumeService.resume(targetGenerationId);
+                            } catch (Exception e) {
+                                log.error("Async agent resume failed after tool approval commit: generationId={}", targetGenerationId, e);
+                            }
+                        });
+                    }
+                });
+            } else {
+                // If not running in an active transaction (e.g. unit tests without Spring transaction manager)
+                agentResumeService.resume(targetGenerationId);
+            }
             return ApiResponse.success();
         }
 

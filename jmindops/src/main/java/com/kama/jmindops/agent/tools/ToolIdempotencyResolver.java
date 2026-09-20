@@ -26,22 +26,16 @@ public class ToolIdempotencyResolver {
     );
 
     public boolean isIdempotent(String toolName, ToolCallback callback) {
-        if (toolName == null) {
-            return false;
-        }
-        String normalized = toolName.toLowerCase(Locale.ROOT);
-        if (BUILTIN_IDEMPOTENT_TOOLS.contains(normalized)) {
-            return true;
-        }
-        if (normalized.startsWith("query") || normalized.startsWith("get")
-                || normalized.startsWith("read") || normalized.startsWith("list")
-                || normalized.startsWith("search") || normalized.startsWith("check")) {
-            return true;
-        }
         if (callback != null) {
             IdempotentTool annotation = findAnnotation(callback);
             if (annotation != null) {
                 return annotation.value();
+            }
+        }
+        if (toolName != null) {
+            String normalized = toolName.toLowerCase(Locale.ROOT);
+            if (BUILTIN_IDEMPOTENT_TOOLS.contains(normalized)) {
+                return true;
             }
         }
         return false;
@@ -70,7 +64,13 @@ public class ToolIdempotencyResolver {
                 return annotation.value();
             }
         }
-        return isIdempotent(toolName, (ToolCallback) null);
+        if (toolName != null) {
+            String normalized = toolName.toLowerCase(Locale.ROOT);
+            if (BUILTIN_IDEMPOTENT_TOOLS.contains(normalized)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private IdempotentTool findAnnotation(ToolCallback callback) {
