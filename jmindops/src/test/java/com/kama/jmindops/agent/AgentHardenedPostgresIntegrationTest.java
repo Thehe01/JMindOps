@@ -140,7 +140,9 @@ class AgentHardenedPostgresIntegrationTest {
 
     @BeforeEach
     void requirePostgres() {
-        Assumptions.assumeTrue(postgresAvailable, "Live PostgreSQL required for postgres-integration tests");
+        if (!postgresAvailable) {
+            org.junit.jupiter.api.Assertions.fail("Live PostgreSQL database required for AgentHardenedPostgresIntegrationTest");
+        }
     }
 
     /**
