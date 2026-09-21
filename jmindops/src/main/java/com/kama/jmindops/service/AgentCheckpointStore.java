@@ -253,21 +253,10 @@ public class AgentCheckpointStore {
                 SELECT a.id::text FROM tool_approval a
                 WHERE a.status = 'APPROVED'
                   AND a.expires_at > NOW()
-                  AND (
-                      (a.generation_id = CAST(? AS uuid) AND (a.tool_call_id = ? OR (a.tool_call_id IS NULL AND a.tool_name = ?)))
-                      OR (
-                          a.generation_id IS NULL
-                          AND a.tool_name = ?
-                          AND EXISTS (
-                              SELECT 1 FROM generation_task g
-                              WHERE g.id = CAST(? AS uuid)
-                                AND g.session_id = a.session_id
-                                AND g.user_id = a.user_id
-                          )
-                      )
-                  )
+                  AND a.generation_id = CAST(? AS uuid)
+                  AND (a.tool_call_id = ? OR (a.tool_call_id IS NULL AND a.tool_name = ?))
                 LIMIT 1
-                """, String.class, generationId, toolCallId, toolName, toolName, generationId);
+                """, String.class, generationId, toolCallId, toolName);
         return !list.isEmpty();
     }
 

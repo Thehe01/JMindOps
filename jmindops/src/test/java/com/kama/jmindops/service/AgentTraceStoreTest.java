@@ -106,15 +106,38 @@ class AgentTraceStoreTest {
         }
     }
 
+    @Test
+    void staleLeaseThrowsExceptionAndRejectsTraceMutation() {
+        RecordingJdbcTemplate jdbcTemplate = new RecordingJdbcTemplate(sql -> 1);
+        jdbcTemplate.setLeaseValid(false);
+        AgentTraceStore store = new AgentTraceStore(jdbcTemplate);
+        String genId = "00000000-0000-0000-0000-000000000001";
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                store.recordRouting(genId, "CHAT", "worker-stale", 1L))
+                .isInstanceOf(com.kama.jmindops.exception.StaleGenerationLeaseException.class)
+                .hasMessageContaining("rejected by fencing");
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                store.startStep(genId, 1, "worker-stale", 1L))
+                .isInstanceOf(com.kama.jmindops.exception.StaleGenerationLeaseException.class)
+                .hasMessageContaining("rejected by fencing");
+    }
+
     private record SqlCall(String sql, Object[] arguments) {
     }
 
     private static final class RecordingJdbcTemplate extends JdbcTemplate {
         private final List<SqlCall> calls = new ArrayList<>();
         private final ToIntFunction<String> result;
+        private boolean leaseValid = true;
 
         private RecordingJdbcTemplate(ToIntFunction<String> result) {
             this.result = result;
+        }
+
+        public void setLeaseValid(boolean leaseValid) {
+            this.leaseValid = leaseValid;
         }
 
         @Override
@@ -130,6 +153,16 @@ class AgentTraceStoreTest {
                 return requiredType.cast(java.util.UUID.randomUUID().toString());
             }
             return null;
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public <T> List<T> query(String sql, org.springframework.jdbc.core.RowMapper<T> rowMapper, Object... args) {
+            calls.add(new SqlCall(sql, args));
+            if (sql.contains("SELECT 1 FROM generation_task")) {
+                return leaseValid ? (List<T>) List.of(Integer.valueOf(1)) : List.of();
+            }
+            return List.of();
         }
     }
 }

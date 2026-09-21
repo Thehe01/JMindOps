@@ -623,14 +623,20 @@ class AgentHardenedPostgresIntegrationTest {
 
         AgentTraceStore traceStore = new AgentTraceStore(jdbcTemplate);
 
-        // 1. Stale worker-1 attempts recordRouting with stale lease 1
-        traceStore.recordRouting(genId, "CHAT", "worker-1", 1L);
+        // 1. Stale worker-1 attempts recordRouting with stale lease 1 -> REJECTED BY FENCING
+        assertThatThrownBy(() -> traceStore.recordRouting(genId, "CHAT", "worker-1", 1L))
+                .isInstanceOf(StaleGenerationLeaseException.class)
+                .hasMessageContaining("rejected by fencing");
 
-        // 2. Stale worker-1 attempts startStep with stale lease 1
-        String stepId = traceStore.startStep(genId, 5, "worker-1", 1L);
+        // 2. Stale worker-1 attempts startStep with stale lease 1 -> REJECTED BY FENCING
+        assertThatThrownBy(() -> traceStore.startStep(genId, 5, "worker-1", 1L))
+                .isInstanceOf(StaleGenerationLeaseException.class)
+                .hasMessageContaining("rejected by fencing");
 
-        // 3. Stale worker-1 attempts completeThinking with stale lease 1
-        traceStore.completeThinking(genId, stepId, null, null, 100L, "test-model", "worker-1", 1L);
+        // 3. Stale worker-1 attempts completeThinking with stale lease 1 -> REJECTED BY FENCING
+        assertThatThrownBy(() -> traceStore.completeThinking(genId, "some-step-id", null, null, 100L, "test-model", "worker-1", 1L))
+                .isInstanceOf(StaleGenerationLeaseException.class)
+                .hasMessageContaining("rejected by fencing");
 
         // Verify in real PostgreSQL: generation_task was NOT mutated by stale worker-1!
         GenerationTask task = taskStore.findExecutionTask(genId).orElseThrow();
@@ -641,6 +647,7 @@ class AgentHardenedPostgresIntegrationTest {
         assertThat(trace.routingDecision()).isNull(); // Not updated to CHAT
         assertThat(trace.currentStep()).isLessThan(5); // Not updated to 5
         assertThat(trace.cumulativeTokens()).isEqualTo(0L); // Not updated
+        assertThat(trace.steps()).isEmpty(); // No step trace inserted!
     }
 
     @Test

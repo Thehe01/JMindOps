@@ -830,21 +830,21 @@ class AgentCheckpointResumeTest {
         when(jdbcTemplate.queryForList(
                 anyString(),
                 eq(String.class),
-                eq(gen1), eq(call1), eq(toolName), eq(toolName), eq(gen1)
+                eq(gen1), eq(call1), eq(toolName)
         )).thenReturn(List.of("approval-id-1"));
 
         // When queried for gen2 + call1: return empty list
         when(jdbcTemplate.queryForList(
                 anyString(),
                 eq(String.class),
-                eq(gen2), eq(call1), eq(toolName), eq(toolName), eq(gen2)
+                eq(gen2), eq(call1), eq(toolName)
         )).thenReturn(List.of());
 
         // When queried for gen1 + call2: return empty list
         when(jdbcTemplate.queryForList(
                 anyString(),
                 eq(String.class),
-                eq(gen1), eq(call2), eq(toolName), eq(toolName), eq(gen1)
+                eq(gen1), eq(call2), eq(toolName)
         )).thenReturn(List.of());
 
         assertThat(checkpointStore.isToolApprovalGranted(gen1, call1, toolName)).isTrue();

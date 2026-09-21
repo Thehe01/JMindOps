@@ -1,6 +1,7 @@
 package com.kama.jmindops.service;
 
 import com.kama.jmindops.model.response.AgentTraceResponse;
+import com.kama.jmindops.exception.StaleGenerationLeaseException;
 import com.kama.jmindops.governance.ToolApprovalSignal;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
@@ -31,7 +32,28 @@ public class AgentTraceStore {
         this.jdbcTemplate = jdbcTemplate;
     }
 
+    public void assertActiveLease(String generationId, String workerId, long leaseVersion) {
+        if (generationId == null) {
+            throw new IllegalArgumentException("generationId must not be null");
+        }
+        if (workerId == null || leaseVersion <= 0) {
+            return;
+        }
+        List<Integer> list = jdbcTemplate.query("""
+                SELECT 1 FROM generation_task
+                WHERE id = CAST(? AS uuid)
+                  AND status IN ('RUNNING', 'WAITING_APPROVAL')
+                  AND worker_id = ?
+                  AND lease_version = ?
+                """, (rs, rowNum) -> 1, generationId, workerId, leaseVersion);
+        if (list.isEmpty()) {
+            throw new StaleGenerationLeaseException("Trace mutation rejected by fencing: generationId="
+                    + generationId + ", workerId=" + workerId + ", leaseVersion=" + leaseVersion);
+        }
+    }
+
     public void recordRouting(String generationId, String routingDecision, String workerId, long leaseVersion) {
+        assertActiveLease(generationId, workerId, leaseVersion);
         jdbcTemplate.update("""
                 UPDATE generation_task
                 SET routing_decision = ?, updated_at = NOW()
@@ -40,6 +62,10 @@ public class AgentTraceStore {
                 """, routingDecision, generationId, workerId, leaseVersion);
     }
 
+    /**
+     * @deprecated Use {@link #recordRouting(String, String, String, long)} with fencing instead.
+     */
+    @Deprecated
     public void recordRouting(String generationId, String routingDecision) {
         jdbcTemplate.update("""
                 UPDATE generation_task
@@ -50,6 +76,7 @@ public class AgentTraceStore {
 
     @Transactional
     public String startStep(String generationId, int stepNo, String workerId, long leaseVersion) {
+        assertActiveLease(generationId, workerId, leaseVersion);
         String stepId = jdbcTemplate.queryForObject("""
                 INSERT INTO agent_step_trace (id, generation_id, step_no, status)
                 VALUES (CAST(? AS uuid), CAST(? AS uuid), ?, 'THINKING')
@@ -66,6 +93,10 @@ public class AgentTraceStore {
         return stepId;
     }
 
+    /**
+     * @deprecated Use {@link #startStep(String, int, String, long)} with fencing instead.
+     */
+    @Deprecated
     @Transactional
     public String startStep(String generationId, int stepNo) {
         String stepId = jdbcTemplate.queryForObject("""
@@ -94,6 +125,7 @@ public class AgentTraceStore {
             String workerId,
             long leaseVersion
     ) {
+        assertActiveLease(generationId, workerId, leaseVersion);
         List<AssistantMessage.ToolCall> toolCalls = message == null || message.getToolCalls() == null
                 ? List.of()
                 : message.getToolCalls();
@@ -147,6 +179,10 @@ public class AgentTraceStore {
         return tokenUsage.totalTokens();
     }
 
+    /**
+     * @deprecated Use {@link #completeThinking(String, String, AssistantMessage, Usage, Long, String, String, long)} with fencing instead.
+     */
+    @Deprecated
     @Transactional
     public long completeThinking(
             String generationId,
@@ -161,9 +197,14 @@ public class AgentTraceStore {
 
     @Transactional
     public void markToolsRunning(String generationId, String stepId, String workerId, long leaseVersion) {
+        assertActiveLease(generationId, workerId, leaseVersion);
         markToolsRunning(generationId, stepId);
     }
 
+    /**
+     * @deprecated Use {@link #markToolsRunning(String, String, String, long)} with fencing instead.
+     */
+    @Deprecated
     @Transactional
     public void markToolsRunning(String generationId, String stepId) {
         jdbcTemplate.update("""
@@ -189,9 +230,14 @@ public class AgentTraceStore {
             String workerId,
             long leaseVersion
     ) {
+        assertActiveLease(generationId, workerId, leaseVersion);
         completeTools(generationId, stepId, responseMessage, latencyMs);
     }
 
+    /**
+     * @deprecated Use {@link #completeTools(String, String, ToolResponseMessage, long, String, long)} with fencing instead.
+     */
+    @Deprecated
     @Transactional
     public void completeTools(
             String generationId,
@@ -247,9 +293,14 @@ public class AgentTraceStore {
 
     @Transactional
     public void failStep(String generationId, String stepId, String errorMessage, boolean toolOutcomeUnknown, String workerId, long leaseVersion) {
+        assertActiveLease(generationId, workerId, leaseVersion);
         failStep(generationId, stepId, errorMessage, toolOutcomeUnknown);
     }
 
+    /**
+     * @deprecated Use {@link #failStep(String, String, String, boolean, String, long)} with fencing instead.
+     */
+    @Deprecated
     @Transactional
     public void failStep(String generationId, String stepId, String errorMessage, boolean toolOutcomeUnknown) {
         if (stepId == null) {

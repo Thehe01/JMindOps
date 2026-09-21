@@ -99,8 +99,7 @@ public class ChatEventListener {
             JMindOps jMindOps = jMindOpsFactory.create(
                     task.agentId(), sessionId, decision, generationId, rewrittenInput, workerId, leaseVersion);
             if (jMindOps == null) {
-                jMindOps = jMindOpsFactory.create(
-                        task.agentId(), sessionId, decision, generationId, rewrittenInput);
+                throw new IllegalStateException("Failed to create JMindOps runtime for agent: " + task.agentId());
             }
             touchHeartbeatWithFencing(generationId, workerId, leaseVersion);
             jMindOps.run();
