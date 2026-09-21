@@ -13,7 +13,17 @@ else
     set --
 fi
 
-psql "$@" --username "$POSTGRES_USER" --dbname "$POSTGRES_DB"     --set=ON_ERROR_STOP=1 --set=app_password="$APP_DB_PASSWORD" <<'EOSQL'
+MAX_RETRIES=30
+RETRY_INTERVAL=2
+attempt=1
+
+while [ "$attempt" -le "$MAX_RETRIES" ]; do
+    # Verify the database is up and accepting queries (ParadeDB may restart during bootstrap)
+    if psql "$@" --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+        --tuples-only --no-align --command "SELECT 1" >/dev/null 2>&1; then
+
+        if psql "$@" --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+            --set=ON_ERROR_STOP=1 --set=app_password="$APP_DB_PASSWORD" <<'EOSQL'
 \set QUIET on
 SELECT format(
     'CREATE ROLE jmindops_app LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION',
@@ -45,10 +55,10 @@ BEGIN
 END
 $$;
 EOSQL
-
-if [ -n "${DB_TOOL_PASSWORD:-}" ]; then
-    psql "$@" --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
-        --set=ON_ERROR_STOP=1 --set=tool_password="$DB_TOOL_PASSWORD" <<'EOSQL'
+        then
+            if [ -n "${DB_TOOL_PASSWORD:-}" ]; then
+                if ! psql "$@" --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+                    --set=ON_ERROR_STOP=1 --set=tool_password="$DB_TOOL_PASSWORD" <<'EOSQL'
 \set QUIET on
 SELECT format(
     'CREATE ROLE jmindops_tool_reader LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION',
@@ -76,5 +86,25 @@ BEGIN
 END
 $$;
 EOSQL
-fi
+                then
+                    echo "Tool reader role initialization failed (attempt $attempt/$MAX_RETRIES), retrying in ${RETRY_INTERVAL}s..." >&2
+                    sleep "$RETRY_INTERVAL"
+                    attempt=$((attempt + 1))
+                    continue
+                fi
+            fi
+
+            echo "Database roles initialized successfully."
+            unset PGPASSWORD
+            exit 0
+        fi
+    fi
+
+    echo "Waiting for PostgreSQL at ${POSTGRES_HOST:-localhost} to be ready and accept role initialization (attempt $attempt/$MAX_RETRIES)..." >&2
+    sleep "$RETRY_INTERVAL"
+    attempt=$((attempt + 1))
+done
+
+echo "Error: Failed to initialize database roles after $MAX_RETRIES attempts." >&2
 unset PGPASSWORD
+exit 1
