@@ -107,7 +107,7 @@ python scripts/score-agent-eval.py `
 
 - JWT 身份认证与用户级资源所有权校验覆盖 Agent、会话和知识库；管理员权限会查库确认，降低 token 有效期内降权失效风险。
 - 外部消息的 role 和 metadata 由服务端生成，客户端不能伪造 Assistant、工具调用或 Token 用量。
-- 高风险工具默认关闭；启用后仍需要管理员绑定与用户审批。审批在 Spring AI 的统一 `ToolCallback` 执行边界强制，AOP 作为直接方法调用的兜底，避免代理层级或反射调用绕过治理；审批按用户、会话、工具和参数指纹关联，并以条件更新/行锁保证单次消费。
+- 高风险工具默认关闭；启用后仍需要管理员绑定与用户审批。审批在 Spring AI 的统一 `ToolCallback` 执行边界强制，AOP 作为直接方法调用的兜底，避免代理层级或反射调用绕过治理；审批严格绑定 `generationId`、`toolCallId`、用户、会话与参数指纹，杜绝未隔离回退与跨代重放，并以条件更新/行锁保证单次消费；工具执行前强制校验租约（Lease Fencing），Stale Worker 无法提交副作用。
 - 工具内部校验之外还有调用前策略层：破坏性 SQL 与凭证外传请求会直接撤销相关工具；跨 RAG/文件任务只暴露只读回调，避免把“最终会拒绝”当成最小权限。
 - 文件工具默认关闭，并锁定到配置的工作区根目录；拒绝绝对路径、隐藏路径、路径穿越和符号链接越界，限制读写大小，所有写入、追加、建目录和删除都需要审批。
 - 数据库工具只允许受限 SELECT，并禁止访问鉴权、审批、生成任务、审计和 PostgreSQL 凭证表；生产环境仍建议使用独立只读数据源。
@@ -120,7 +120,7 @@ python scripts/score-agent-eval.py `
 | --- | --- |
 | 前端 | React 19、TypeScript、Vite、Ant Design、fetch-stream SSE |
 | 后端 | Java 17、Spring Boot 3.5、Spring AI 1.1、MyBatis、WebClient |
-| 数据 | PostgreSQL 15、pgvector、ParadeDB pg_search（Jieba + BM25）、JSONB、Flyway、Redis 7 |
+| 数据 | PostgreSQL 15（JDBC 42.7.13）、pgvector、ParadeDB pg_search（Jieba + BM25）、JSONB、Flyway、Redis 7 |
 | AI | DeepSeek、智谱 GLM、Google Gemini、本地 Ollama/Qwen2.5、BGE-M3、可选 Reranker、MCP |
 | 工程化 | Docker Compose、Nginx、ToolCallback 治理、AOP Trace、JUnit 5、Mockito |
 
@@ -134,7 +134,7 @@ python scripts/score-agent-eval.py `
 4. RAG 需要单独提供 BGE-M3 embedding 服务，并通过 `RAG_EMBEDDING_BASE_URL` 配置。Reranker 默认不启动；需要时按下方可选 Profile 启动。
 5. 运行 `docker compose up --build`，访问 `http://localhost:3000`。
 
-Compose 默认只启动带 pgvector/pg_search 的 PostgreSQL 15、Redis、Spring Boot 和 Nginx；embedding、reranker 模型不会被悄悄下载。数据库由 `jmindops/src/main/resources/db/migration` 下的 Flyway V1～V12 迁移，`db-role-init` 创建/轮换低权限运行账号。V7 建立 Jieba 分词的 BM25 索引，V8 增加脱敏的 Agent step/tool Trace，V9 增加索引管线指纹与数据库工具只读授权，V10 引入 Durable Document Index Task 异步任务，V11 增加任务 Fencing 与取消控制，V12 引入 Agent Step Checkpoint 与工具执行账本（Execution Ledger）。
+Compose 默认只启动带 pgvector/pg_search 的 PostgreSQL 15、Redis、Spring Boot 和 Nginx；embedding、reranker 模型不会被悄悄下载。数据库由 `jmindops/src/main/resources/db/migration` 下的 Flyway V1～V12 迁移，`db-role-init` 具备就绪探针与轮询重试机制（平滑容忍 ParadeDB 首次初始化的容器重启），负责创建/轮换低权限运行账号。V7 建立 Jieba 分词的 BM25 索引，V8 增加脱敏的 Agent step/tool Trace，V9 增加索引管线指纹与数据库工具只读授权，V10 引入 Durable Document Index Task 异步任务，V11 增加任务 Fencing 与取消控制，V12 引入 Agent Step Checkpoint 与工具执行账本（Execution Ledger）。
 
 升级到 V9 后，无法证明模型来源的旧向量会被标记为 `STALE`，并暂时退出检索。请按当前 embedding 与切块配置重新上传对应文档完成安全重建。模型、维度或归一化配置变化会自动形成新指纹；修改解析或切块逻辑时，应同步提升 `RAG_INDEX_PIPELINE_VERSION` 并重建索引。
 
@@ -214,7 +214,7 @@ docker compose --profile rerank-cpu up -d reranker-tei
 基础设施：bash scripts/compose-smoke.sh
 ```
 
-默认后端测试不会调用真实模型。`mvn -Plive-tests test` 才运行 live 测试，需要配置有效模型密钥并可能产生费用。Compose 冒烟脚本会新建隔离项目，验证 V1～V12、BM25 中文召回、增量索引字段与指纹、运行账号权限、注册登录和 Header JWT，结束后清理测试栈。
+CI 门禁开启 `pipefail` 严格校验 `mvn verify`、`npm audit` 生产依赖高危漏洞拦截以及 Trivy（v0.36.0）全量漏洞与配置扫描。默认后端测试不会调用真实模型。`mvn -Plive-tests test` 才运行 live 测试，需要配置有效模型密钥并可能产生费用。Compose 冒烟脚本会新建隔离项目，验证 V1～V12、BM25 中文召回、增量索引字段与指纹、运行账号权限、注册登录和 Header JWT，结束后清理测试栈。
 
 ## 关键接口
 
@@ -232,7 +232,7 @@ docker compose --profile rerank-cpu up -d reranker-tei
 
 ## 已知边界与下一步
 
-- Agent 支持基于 PostgreSQL 的 Durable Step Checkpoint 与工具执行账本，非幂等工具遵循 Default-Deny 显式原则阻断自动重放，崩溃或重启后可从最后安全检查点恢复；遇到人工审批挂起为 `WAITING_APPROVAL`，审批完成后在原 generation 原位异步恢复。大规模跨节点调度仍可向外部工作流引擎演进。
+- Agent 支持基于 PostgreSQL 的 Durable Step Checkpoint 与工具执行账本，非幂等工具遵循 Default-Deny 显式原则阻断自动重放，崩溃或重启后可从最后安全检查点恢复；遇到人工审批挂起为 `WAITING_APPROVAL`，审批完成后在原 generation 原位异步恢复。工具调用、心跳、Ledger 与 Trace 记录全面受 `(generationId, workerId, leaseVersion)` 租约隔离保护，Stale Worker 无法产生脏写入。大规模跨节点调度仍可向外部工作流引擎演进。
 - RUNNING 依赖基于 `(generationId, workerId, leaseVersion)` 的分布式租约心跳，心跳超时由后台巡检通过 `FOR UPDATE SKIP LOCKED` 原子抢占并触发自动 Resume。
 - SSE 不做历史 chunk 重放，断线后以数据库中的完整消息与 Checkpoint 状态为准。
 - 文档上传后采用 PostgreSQL Durable Document Index Task 异步处理，HTTP 上传请求立即返回，后台 Worker 通过 `FOR UPDATE SKIP LOCKED` 串行执行版本并做租约 Fencing 与原子 Commit。
