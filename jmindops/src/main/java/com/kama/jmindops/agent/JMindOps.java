@@ -399,7 +399,7 @@ public class JMindOps {
         saveMessage(output, usage, costTime, modelName);
         if (this.agentTraceStore != null && stepTraceId != null) {
             this.agentTraceStore.completeThinking(
-                    this.generationId, stepTraceId, output, usage, costTime, modelName);
+                    this.generationId, stepTraceId, output, usage, costTime, modelName, this.workerId, this.leaseVersion);
         }
         logToolCalls(toolCalls);
 
@@ -587,7 +587,9 @@ public class JMindOps {
                     this.generationId,
                     stepTraceId,
                     toolResponseMessage,
-                    System.currentTimeMillis() - startedAt
+                    System.currentTimeMillis() - startedAt,
+                    this.workerId,
+                    this.leaseVersion
             );
         }
 
@@ -657,7 +659,7 @@ public class JMindOps {
     private void step(int stepNo) {
         String stepTraceId = this.agentTraceStore == null
                 ? null
-                : this.agentTraceStore.startStep(this.generationId, stepNo);
+                : this.agentTraceStore.startStep(this.generationId, stepNo, this.workerId, this.leaseVersion);
         boolean toolExecutionStarted = false;
         try {
             if (think(stepTraceId)) {
@@ -678,7 +680,7 @@ public class JMindOps {
                 }
 
                 if (this.agentTraceStore != null && stepTraceId != null) {
-                    this.agentTraceStore.markToolsRunning(this.generationId, stepTraceId);
+                    this.agentTraceStore.markToolsRunning(this.generationId, stepTraceId, this.workerId, this.leaseVersion);
                 }
                 toolExecutionStarted = true;
 
@@ -715,7 +717,9 @@ public class JMindOps {
                             this.generationId,
                             stepTraceId,
                             exception.getMessage(),
-                            toolExecutionStarted
+                            toolExecutionStarted,
+                            this.workerId,
+                            this.leaseVersion
                     );
                 } catch (RuntimeException traceException) {
                     exception.addSuppressed(traceException);
@@ -800,7 +804,7 @@ public class JMindOps {
     private void executeRequiredKnowledgeRetrieval(int stepNo) {
         String stepTraceId = this.agentTraceStore == null
                 ? null
-                : this.agentTraceStore.startStep(this.generationId, stepNo);
+                : this.agentTraceStore.startStep(this.generationId, stepNo, this.workerId, this.leaseVersion);
         boolean toolExecutionStarted = false;
         try {
             ToolCallback knowledgeCallback = this.runtimeTools.stream()
@@ -811,7 +815,7 @@ public class JMindOps {
             String toolCallId = UUID.randomUUID().toString();
             String arguments = knowledgeArguments(knowledgeBase.getId(), requiredKnowledgeQuery);
             AssistantMessage.ToolCall toolCall = new AssistantMessage.ToolCall(
-                    toolCallId, "function", KNOWLEDGE_TOOL_NAME, arguments);
+                toolCallId, "function", KNOWLEDGE_TOOL_NAME, arguments);
             AssistantMessage toolCallMessage = org.springframework.ai.chat.messages.AssistantMessageFactory.create(
                     "", new java.util.HashMap<>(), List.of(toolCall));
 
@@ -820,8 +824,8 @@ public class JMindOps {
             if (this.agentTraceStore != null && stepTraceId != null) {
                 this.agentTraceStore.completeThinking(
                         this.generationId, stepTraceId, toolCallMessage, null, 0L,
-                        "deterministic-rag-orchestrator");
-                this.agentTraceStore.markToolsRunning(this.generationId, stepTraceId);
+                        "deterministic-rag-orchestrator", this.workerId, this.leaseVersion);
+                this.agentTraceStore.markToolsRunning(this.generationId, stepTraceId, this.workerId, this.leaseVersion);
             }
 
             // Checkpoint boundary 1
@@ -875,7 +879,8 @@ public class JMindOps {
             if (this.agentTraceStore != null && stepTraceId != null) {
                 this.agentTraceStore.completeTools(
                         this.generationId, stepTraceId, responseMessage,
-                        System.currentTimeMillis() - startedAt);
+                        System.currentTimeMillis() - startedAt,
+                        this.workerId, this.leaseVersion);
             }
             this.retrievedSourceCount = RagAnswerPolicy.countSources(responseData);
             this.requiredKnowledgeRetrievalCompleted = true;
@@ -896,7 +901,8 @@ public class JMindOps {
             }
             if (this.agentTraceStore != null && stepTraceId != null) {
                 this.agentTraceStore.failStep(
-                        this.generationId, stepTraceId, exception.getMessage(), toolExecutionStarted);
+                        this.generationId, stepTraceId, exception.getMessage(), toolExecutionStarted,
+                        this.workerId, this.leaseVersion);
             }
             throw exception;
         }
@@ -938,14 +944,14 @@ public class JMindOps {
     private void finishWithoutEvidence(int stepNo) {
         String stepTraceId = this.agentTraceStore == null
                 ? null
-                : this.agentTraceStore.startStep(this.generationId, stepNo);
+                : this.agentTraceStore.startStep(this.generationId, stepNo, this.workerId, this.leaseVersion);
         AssistantMessage response = new AssistantMessage(RagAnswerPolicy.INSUFFICIENT_EVIDENCE_MESSAGE);
         publishChunk(response.getText());
         saveMessage(response, null, 0L, "deterministic-rag-orchestrator");
         if (this.agentTraceStore != null && stepTraceId != null) {
             this.agentTraceStore.completeThinking(
                     this.generationId, stepTraceId, response, null, 0L,
-                    "deterministic-rag-orchestrator");
+                    "deterministic-rag-orchestrator", this.workerId, this.leaseVersion);
         }
         this.agentState = AgentState.FINISHED;
         if (this.checkpointStore != null) {
@@ -1004,9 +1010,9 @@ public class JMindOps {
                                 CheckpointPayload.deserializeToolCalls(latestCheckpoint.pendingToolCalls());
                         String stepTraceId = this.agentTraceStore == null
                                 ? null
-                                : this.agentTraceStore.startStep(this.generationId, resumeStep);
+                                : this.agentTraceStore.startStep(this.generationId, resumeStep, this.workerId, this.leaseVersion);
                         if (this.agentTraceStore != null && stepTraceId != null) {
-                            this.agentTraceStore.markToolsRunning(this.generationId, stepTraceId);
+                            this.agentTraceStore.markToolsRunning(this.generationId, stepTraceId, this.workerId, this.leaseVersion);
                         }
 
                         boolean suspended = executeToolsWithLedger(resumeStep, stepTraceId, pendingCalls);

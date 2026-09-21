@@ -31,12 +31,39 @@ public class AgentTraceStore {
         this.jdbcTemplate = jdbcTemplate;
     }
 
+    public void recordRouting(String generationId, String routingDecision, String workerId, long leaseVersion) {
+        jdbcTemplate.update("""
+                UPDATE generation_task
+                SET routing_decision = ?, updated_at = NOW()
+                WHERE id = CAST(? AS uuid) AND status = 'RUNNING'
+                  AND worker_id = ? AND lease_version = ?
+                """, routingDecision, generationId, workerId, leaseVersion);
+    }
+
     public void recordRouting(String generationId, String routingDecision) {
         jdbcTemplate.update("""
                 UPDATE generation_task
-                SET routing_decision = ?, checkpoint_version = checkpoint_version + 1, updated_at = NOW()
+                SET routing_decision = ?, updated_at = NOW()
                 WHERE id = CAST(? AS uuid) AND status = 'RUNNING'
                 """, routingDecision, generationId);
+    }
+
+    @Transactional
+    public String startStep(String generationId, int stepNo, String workerId, long leaseVersion) {
+        String stepId = jdbcTemplate.queryForObject("""
+                INSERT INTO agent_step_trace (id, generation_id, step_no, status)
+                VALUES (CAST(? AS uuid), CAST(? AS uuid), ?, 'THINKING')
+                ON CONFLICT (generation_id, step_no) DO UPDATE
+                SET updated_at = NOW()
+                RETURNING id
+                """, String.class, UUID.randomUUID().toString(), generationId, stepNo);
+        jdbcTemplate.update("""
+                UPDATE generation_task
+                SET current_step = GREATEST(current_step, ?), updated_at = NOW()
+                WHERE id = CAST(? AS uuid) AND status = 'RUNNING'
+                  AND worker_id = ? AND lease_version = ?
+                """, stepNo, generationId, workerId, leaseVersion);
+        return stepId;
     }
 
     @Transactional
@@ -50,9 +77,7 @@ public class AgentTraceStore {
                 """, String.class, UUID.randomUUID().toString(), generationId, stepNo);
         jdbcTemplate.update("""
                 UPDATE generation_task
-                SET current_step = GREATEST(current_step, ?),
-                    checkpoint_version = checkpoint_version + 1,
-                    heartbeat_at = NOW(), updated_at = NOW()
+                SET current_step = GREATEST(current_step, ?), updated_at = NOW()
                 WHERE id = CAST(? AS uuid) AND status = 'RUNNING'
                 """, stepNo, generationId);
         return stepId;
@@ -65,7 +90,9 @@ public class AgentTraceStore {
             AssistantMessage message,
             Usage usage,
             Long latencyMs,
-            String modelName
+            String modelName,
+            String workerId,
+            long leaseVersion
     ) {
         List<AssistantMessage.ToolCall> toolCalls = message == null || message.getToolCalls() == null
                 ? List.of()
@@ -103,14 +130,38 @@ public class AgentTraceStore {
                     toolCall.name(), arguments.length(), sha256(arguments));
         }
 
-        jdbcTemplate.update("""
-                UPDATE generation_task
-                SET cumulative_tokens = cumulative_tokens + ?,
-                    checkpoint_version = checkpoint_version + 1,
-                    heartbeat_at = NOW(), updated_at = NOW()
-                WHERE id = CAST(? AS uuid) AND status = 'RUNNING'
-                """, tokenUsage.totalTokens(), generationId);
+        if (workerId != null && leaseVersion > 0) {
+            jdbcTemplate.update("""
+                    UPDATE generation_task
+                    SET cumulative_tokens = cumulative_tokens + ?, updated_at = NOW()
+                    WHERE id = CAST(? AS uuid) AND status = 'RUNNING'
+                      AND worker_id = ? AND lease_version = ?
+                    """, tokenUsage.totalTokens(), generationId, workerId, leaseVersion);
+        } else {
+            jdbcTemplate.update("""
+                    UPDATE generation_task
+                    SET cumulative_tokens = cumulative_tokens + ?, updated_at = NOW()
+                    WHERE id = CAST(? AS uuid) AND status = 'RUNNING'
+                    """, tokenUsage.totalTokens(), generationId);
+        }
         return tokenUsage.totalTokens();
+    }
+
+    @Transactional
+    public long completeThinking(
+            String generationId,
+            String stepId,
+            AssistantMessage message,
+            Usage usage,
+            Long latencyMs,
+            String modelName
+    ) {
+        return completeThinking(generationId, stepId, message, usage, latencyMs, modelName, null, 0L);
+    }
+
+    @Transactional
+    public void markToolsRunning(String generationId, String stepId, String workerId, long leaseVersion) {
+        markToolsRunning(generationId, stepId);
     }
 
     @Transactional
@@ -127,6 +178,18 @@ public class AgentTraceStore {
                 WHERE step_trace_id = CAST(? AS uuid) AND generation_id = CAST(? AS uuid)
                   AND status = 'PREPARED'
                 """, stepId, generationId);
+    }
+
+    @Transactional
+    public void completeTools(
+            String generationId,
+            String stepId,
+            ToolResponseMessage responseMessage,
+            long latencyMs,
+            String workerId,
+            long leaseVersion
+    ) {
+        completeTools(generationId, stepId, responseMessage, latencyMs);
     }
 
     @Transactional
@@ -180,12 +243,11 @@ public class AgentTraceStore {
                 unresolved == 0 ? "COMPLETED" : "UNKNOWN",
                 unresolved == 0 ? null : "存在无法关联结果的工具调用",
                 stepId, generationId);
-        jdbcTemplate.update("""
-                UPDATE generation_task
-                SET checkpoint_version = checkpoint_version + 1,
-                    heartbeat_at = NOW(), updated_at = NOW()
-                WHERE id = CAST(? AS uuid) AND status = 'RUNNING'
-                """, generationId);
+    }
+
+    @Transactional
+    public void failStep(String generationId, String stepId, String errorMessage, boolean toolOutcomeUnknown, String workerId, long leaseVersion) {
+        failStep(generationId, stepId, errorMessage, toolOutcomeUnknown);
     }
 
     @Transactional

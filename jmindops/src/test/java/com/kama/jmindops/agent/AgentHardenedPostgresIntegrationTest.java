@@ -8,6 +8,7 @@ import com.kama.jmindops.model.entity.AgentToolExecution;
 import com.kama.jmindops.model.entity.GenerationTask;
 import com.kama.jmindops.service.AgentCheckpointStore;
 import com.kama.jmindops.service.AgentResumeService;
+import com.kama.jmindops.service.AgentTraceStore;
 import com.kama.jmindops.service.ChatGenerationCoordinator;
 import com.kama.jmindops.service.GenerationTaskRecovery;
 import com.kama.jmindops.service.GenerationTaskStore;
@@ -603,5 +604,82 @@ class AgentHardenedPostgresIntegrationTest {
         AgentToolExecution currentStatus = checkpointStore.findToolExecution(genId, toolCallId).orElseThrow();
         assertThat(currentStatus.status()).isEqualTo(AgentToolExecution.Status.PREPARED);
         assertThat(currentStatus.result()).isNull();
+    }
+
+    @Test
+    void staleWorkerCannotMutateGenerationViaTrace() {
+        Assumptions.assumeTrue(postgresAvailable, "PostgreSQL is not available, skipping test");
+
+        String genId = UUID.randomUUID().toString();
+        String reqId = UUID.randomUUID().toString();
+        taskStore.createPending(genId, null, TEST_USER_ID, reqId, "fp-trace",
+                TEST_AGENT_ID, TEST_SESSION_ID, null, "stale worker trace test");
+        long lease1 = taskStore.claimForExecution(genId, "worker-1");
+        assertThat(lease1).isEqualTo(1L);
+
+        // Preempt lease: worker-2 claims the task for resume -> lease_version increments to 2
+        long newLease = taskStore.claimForResume(genId, "worker-2", 1L);
+        assertThat(newLease).isEqualTo(2L);
+
+        AgentTraceStore traceStore = new AgentTraceStore(jdbcTemplate);
+
+        // 1. Stale worker-1 attempts recordRouting with stale lease 1
+        traceStore.recordRouting(genId, "CHAT", "worker-1", 1L);
+
+        // 2. Stale worker-1 attempts startStep with stale lease 1
+        String stepId = traceStore.startStep(genId, 5, "worker-1", 1L);
+
+        // 3. Stale worker-1 attempts completeThinking with stale lease 1
+        traceStore.completeThinking(genId, stepId, null, null, 100L, "test-model", "worker-1", 1L);
+
+        // Verify in real PostgreSQL: generation_task was NOT mutated by stale worker-1!
+        GenerationTask task = taskStore.findExecutionTask(genId).orElseThrow();
+        assertThat(task.workerId()).isEqualTo("worker-2");
+        assertThat(task.leaseVersion()).isEqualTo(2L);
+
+        var trace = traceStore.findTrace(genId).orElseThrow();
+        assertThat(trace.routingDecision()).isNull(); // Not updated to CHAT
+        assertThat(trace.currentStep()).isLessThan(5); // Not updated to 5
+        assertThat(trace.cumulativeTokens()).isEqualTo(0L); // Not updated
+    }
+
+    @Test
+    void approvalDoesNotCrossMatchAcrossGenerationsOrToolCallsInPostgres() {
+        Assumptions.assumeTrue(postgresAvailable, "PostgreSQL is not available, skipping test");
+
+        String genA = UUID.randomUUID().toString();
+        String genB = UUID.randomUUID().toString();
+        taskStore.createPending(genA, null, TEST_USER_ID, UUID.randomUUID().toString(), "fp-a",
+                TEST_AGENT_ID, TEST_SESSION_ID, null, "approval test a");
+        taskStore.claimForExecution(genA, "worker-1");
+
+        taskStore.createPending(genB, null, TEST_USER_ID, UUID.randomUUID().toString(), "fp-b",
+                TEST_AGENT_ID, TEST_SESSION_ID, null, "approval test b");
+        taskStore.claimForExecution(genB, "worker-1");
+
+        String approvalId = UUID.randomUUID().toString();
+        String toolCallId1 = "call-secure-1";
+        String toolCallId2 = "call-secure-2";
+        String toolName = "sensitiveOp";
+
+        // Insert APPROVED record for genA and toolCallId1
+        jdbcTemplate.update("""
+                INSERT INTO tool_approval (
+                    id, user_id, session_id, tool_name, arguments_json, fingerprint,
+                    status, created_at, expires_at, generation_id, tool_call_id
+                ) VALUES (
+                    CAST(? AS uuid), CAST(? AS uuid), CAST(? AS uuid), ?, CAST(? AS jsonb), ?,
+                    'APPROVED', NOW(), NOW() + INTERVAL '10 minutes', CAST(? AS uuid), ?
+                )
+                """, approvalId, TEST_USER_ID, TEST_SESSION_ID, toolName, "{}", "fp", genA, toolCallId1);
+
+        // 1. Exact match on genA + toolCallId1 -> granted!
+        assertThat(checkpointStore.isToolApprovalGranted(genA, toolCallId1, toolName)).isTrue();
+
+        // 2. Different generation genB + toolCallId1 -> MUST NOT be granted!
+        assertThat(checkpointStore.isToolApprovalGranted(genB, toolCallId1, toolName)).isFalse();
+
+        // 3. Same generation genA + different toolCallId2 -> MUST NOT be granted!
+        assertThat(checkpointStore.isToolApprovalGranted(genA, toolCallId2, toolName)).isFalse();
     }
 }

@@ -181,7 +181,7 @@ class ToolApprovalControllerTest {
         ApiResponse<Void> response = controller.reject(approvalId);
         assertThat(response.getCode()).isEqualTo(200);
 
-        verify(generationTaskStore, times(1)).markFailed(eq(genId), eq("审批已被拒绝: dangerousTool"));
+        verify(generationTaskStore, times(1)).markFailed(eq(genId), eq("worker-1"), eq(1L), eq("审批已被拒绝: dangerousTool"));
         verify(chatMessageFacadeService, times(1)).createChatMessage((CreateChatMessageRequest) any());
     }
 }

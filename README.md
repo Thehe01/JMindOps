@@ -2,7 +2,7 @@
 
 JMindOps 不是一个只会“接模型、套聊天页面”的 Agent Demo，而是一个围绕 **可治理、可恢复、可评测** 三个工程问题构建的智能运维与知识协同平台。
 
-它使用 Spring AI 实现可控的 ReAct 单步循环，支持动态 Agent 装配、混合检索 RAG、敏感工具审批和 SSE 流式交互；同时把每轮生成建模为持久任务，用幂等键、事务后派发、Redis single-flight 和恢复扫描处理重复请求、进程中断与事件丢失。V8 进一步把路由、每轮思考和工具调用保存为脱敏 Trace，并用 AgentEval 固定题集量化路由、选工具、审批合规和步数效率。
+它使用 Spring AI 实现可控的 ReAct 单步循环，支持动态 Agent 装配、混合检索 RAG、敏感工具审批和 SSE 流式交互；同时把每轮生成建模为持久任务，用幂等键、事务后派发、Redis single-flight 和恢复扫描处理重复请求、进程中断与事件丢失。V8 进一步把路由、每轮思考和工具调用保存为脱敏 Trace；V10～V11 引入 PostgreSQL Durable Document Index Task 实现高可用异步文档解析与分块索引；V12 进一步实现 Agent Step Checkpoint、Execution Ledger、WAITING_APPROVAL 挂起以及原位恢复（Same-Generation Resume）。
 
 ## 核心架构
 
@@ -33,7 +33,7 @@ flowchart LR
 4. 事务提交后才异步发布 `ChatEvent`；回滚时释放预占，避免“任务先跑、数据未提交”。
 5. 消费者先通过 Redis Lua claim，再以条件更新把任务切为 `RUNNING`。重复事件无法重复 claim。
 6. 成功写入 `SUCCEEDED`，异常写入脱敏后的 `FAILED`；客户端可查询状态，FAILED 可创建带父任务引用的新执行尝试。
-7. 恢复扫描会重派长时间未消费的 PENDING；超过运行心跳阈值的 RUNNING 会变为可重试的 FAILED。
+7. 恢复扫描会重派长时间未消费的 PENDING；运行超时的 RUNNING 任务由分布式租约（Lease & Fencing）原子认领，并从最后一个安全 Checkpoint 自动恢复执行；敏感审批挂起为 `WAITING_APPROVAL`，审批完成后直接在原 generation 原位异步恢复，杜绝盲目判死或重复副作用。
 
 该链路提供的是“**至少一次派发 + 幂等接入 + 条件状态迁移 + 会话单飞**”，没有宣称跨数据库与外部系统的 exactly-once。邮件等外部副作用仍应使用供应商幂等键或事务 Outbox 才能进一步收敛不确定性。
 
@@ -43,7 +43,7 @@ flowchart LR
 - `JMindOps` 显式控制 `think → execute`，限制最大步数，并在工具执行边界绑定用户、会话、KB 白名单。
 - `ToolAccessPolicy` 在工具描述发送给模型前执行确定性裁剪：危险 SQL 不暴露数据库工具，凭证读取/外传不暴露任何外部工具；“知识库步骤 + 工作区核查”可组合 `KnowledgeTool` 与只读 `readFile/listFiles`，写入类回调仍不可见。
 - 每一步在模型调用前建立检查点，随后记录模型、Token、耗时、输出哈希与工具状态；工具执行中异常会标记为 `UNKNOWN`，避免把“可能已产生副作用”误报成普通失败。Trace 不保存原始 Prompt、工具参数或结果。
-- 文档经 Apache Tika 解析清洗后切片；同名文件使用内容 SHA-256 和版本号增量更新，相同 chunk 复用 embedding，数据库事务原子切换新旧索引，删除文档时由外键级联清理 chunk。
+- 文档经 Apache Tika 解析清洗后切片；HTTP 上传不阻塞等待 Embedding，而是通过 PostgreSQL Durable Document Index Task（`FOR UPDATE SKIP LOCKED` + Lease Fencing + 指数退避）异步执行解析与索引写入；同名文件使用内容 SHA-256 和版本号增量更新，相同 chunk 复用 embedding，数据库事务原子切换新旧索引，删除文档时由外键级联清理 chunk。
 - BGE-M3 向量召回与 ParadeDB `pg_search` 的 Jieba + BM25 倒排召回通过 RRF 融合。Rerank 是 `RagReranker` 扩展点，默认 Provider 为 `none`；可选 HTTP Provider 调用失败时，线上问答退化到确定性的 RRF 顺序。
 
 ### 可复现的 RAG 对照评测
@@ -134,7 +134,7 @@ python scripts/score-agent-eval.py `
 4. RAG 需要单独提供 BGE-M3 embedding 服务，并通过 `RAG_EMBEDDING_BASE_URL` 配置。Reranker 默认不启动；需要时按下方可选 Profile 启动。
 5. 运行 `docker compose up --build`，访问 `http://localhost:3000`。
 
-Compose 默认只启动带 pgvector/pg_search 的 PostgreSQL 15、Redis、Spring Boot 和 Nginx；embedding、reranker 模型不会被悄悄下载。数据库由 `jmindops/src/main/resources/db/migration` 下的 Flyway V1～V9 迁移，`db-role-init` 创建/轮换低权限运行账号。V7 建立 Jieba 分词的 BM25 索引，V8 增加脱敏的 Agent step/tool Trace，V9 增加索引管线指纹与数据库工具只读授权。
+Compose 默认只启动带 pgvector/pg_search 的 PostgreSQL 15、Redis、Spring Boot 和 Nginx；embedding、reranker 模型不会被悄悄下载。数据库由 `jmindops/src/main/resources/db/migration` 下的 Flyway V1～V12 迁移，`db-role-init` 创建/轮换低权限运行账号。V7 建立 Jieba 分词的 BM25 索引，V8 增加脱敏的 Agent step/tool Trace，V9 增加索引管线指纹与数据库工具只读授权，V10 引入 Durable Document Index Task 异步任务，V11 增加任务 Fencing 与取消控制，V12 引入 Agent Step Checkpoint 与工具执行账本（Execution Ledger）。
 
 升级到 V9 后，无法证明模型来源的旧向量会被标记为 `STALE`，并暂时退出检索。请按当前 embedding 与切块配置重新上传对应文档完成安全重建。模型、维度或归一化配置变化会自动形成新指纹；修改解析或切块逻辑时，应同步提升 `RAG_INDEX_PIPELINE_VERSION` 并重建索引。
 
@@ -214,7 +214,7 @@ docker compose --profile rerank-cpu up -d reranker-tei
 基础设施：bash scripts/compose-smoke.sh
 ```
 
-默认后端测试不会调用真实模型。`mvn -Plive-tests test` 才运行 live 测试，需要配置有效模型密钥并可能产生费用。Compose 冒烟脚本会新建隔离项目，验证 V1～V9、BM25 中文召回、增量索引字段与指纹、运行账号权限、注册登录和 Header JWT，结束后清理测试栈。
+默认后端测试不会调用真实模型。`mvn -Plive-tests test` 才运行 live 测试，需要配置有效模型密钥并可能产生费用。Compose 冒烟脚本会新建隔离项目，验证 V1～V12、BM25 中文召回、增量索引字段与指纹、运行账号权限、注册登录和 Header JWT，结束后清理测试栈。
 
 ## 关键接口
 
@@ -232,11 +232,10 @@ docker compose --profile rerank-cpu up -d reranker-tei
 
 ## 已知边界与下一步
 
-- Agent 执行仍在单体进程的有界线程池中；PENDING 可恢复，但真正的大规模调度应迁移到 MQ/工作流引擎并加入背压与死信队列。
-- RUNNING 依赖阶段性心跳和超时回收，不能恢复模型已经生成但尚未持久化的 token。
-- Step Trace 是追加式可观测检查点，目前用于复盘和评测，不会从任意中间步骤自动续跑；审批通过仍会创建关联的新 generation，而不是在原线程原地恢复。
-- SSE 不做历史 chunk 重放，断线后以数据库中的完整消息为准。
-- 文档解析和新增 chunk 的 embedding 当前仍在上传请求中同步完成；内容哈希能避免无效重算，但大规模离线建库仍应迁移到异步索引任务与队列。
+- Agent 支持基于 PostgreSQL 的 Durable Step Checkpoint 与工具执行账本，非幂等工具遵循 Default-Deny 显式原则阻断自动重放，崩溃或重启后可从最后安全检查点恢复；遇到人工审批挂起为 `WAITING_APPROVAL`，审批完成后在原 generation 原位异步恢复。大规模跨节点调度仍可向外部工作流引擎演进。
+- RUNNING 依赖基于 `(generationId, workerId, leaseVersion)` 的分布式租约心跳，心跳超时由后台巡检通过 `FOR UPDATE SKIP LOCKED` 原子抢占并触发自动 Resume。
+- SSE 不做历史 chunk 重放，断线后以数据库中的完整消息与 Checkpoint 状态为准。
+- 文档上传后采用 PostgreSQL Durable Document Index Task 异步处理，HTTP 上传请求立即返回，后台 Worker 通过 `FOR UPDATE SKIP LOCKED` 串行执行版本并做租约 Fencing 与原子 Commit。
 - RAG 已区分检索层与端到端回答层；引用编号合法与被引证据关键词覆盖分开计分，但仍不等同于 RAGAS Faithfulness、逐句蕴含或人工事实核验。
 - `ToolAccessPolicy` 目前是高置信关键词策略，只负责提前缩小工具面，不宣称识别所有变体或对抗性绕过；工具内部校验、审批和低权限账号仍是最终强制边界。
 - AgentEval v2 冻结测试集已完成人工复核与 100 题正式单次运行；参数语义真值、审批批准/拒绝/重放全生命周期、多次重复运行方差和 CI 回归门禁仍待补充。

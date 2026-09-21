@@ -39,7 +39,10 @@ jobs:
           java-version: "17"
           cache: maven
       - name: Verify without live model calls
-        run: mvn -B -ntp verify 2>&1 | tee maven-verify.log
+        shell: bash
+        run: |
+          set -eo pipefail
+          mvn -B -ntp verify 2>&1 | tee maven-verify.log
       - name: Dump diagnostics on failure
         if: failure()
         run: |
@@ -82,14 +85,14 @@ jobs:
       - run: npm ci
       - run: npm run build
       - name: Audit production dependencies
-        run: npm audit --omit=dev --audit-level=high || echo "npm audit endpoint returned non-zero, continuing"
+        run: npm audit --omit=dev --audit-level=high
 
   dependency-scan:
     name: Repository vulnerability and secret scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: aquasecurity/trivy-action@0.28.0
+      - uses: aquasecurity/trivy-action@v0.28.0
         with:
           scan-type: fs
           scan-ref: .
@@ -117,7 +120,10 @@ jobs:
       - name: Validate Compose model
         run: docker compose config --quiet
       - name: Build and start from empty volumes
-        run: docker compose up --detach --build --wait --wait-timeout 300 2>&1 | tee docker-compose-up.log
+        shell: bash
+        run: |
+          set -eo pipefail
+          docker compose up --detach --build --wait --wait-timeout 300 2>&1 | tee docker-compose-up.log
       - name: Verify health and Flyway history
         run: |
           curl --fail --retry 10 --retry-delay 2 http://127.0.0.1:3000/health

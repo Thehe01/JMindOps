@@ -139,7 +139,8 @@ public class ToolApprovalController {
             waitingTask = generationTaskStore.findWaitingApprovalForSession(record.sessionId());
         }
         if (waitingTask.isPresent() && generationTaskStore != null) {
-            generationTaskStore.markFailed(waitingTask.get().id(), "审批已被拒绝: " + record.toolName());
+            GenerationTask task = waitingTask.get();
+            generationTaskStore.markFailed(task.id(), task.workerId(), task.leaseVersion(), "审批已被拒绝: " + record.toolName());
         }
 
         // 自动触发 Agent 调整决策并告知用户

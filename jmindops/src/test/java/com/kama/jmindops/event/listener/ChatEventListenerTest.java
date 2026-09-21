@@ -79,7 +79,7 @@ class ChatEventListenerTest {
         verify(taskStore, never()).markRunning(org.mockito.ArgumentMatchers.anyString());
         verify(taskStore, never()).markSucceeded(org.mockito.ArgumentMatchers.anyString());
         verify(coordinator).registerRunning(org.mockito.ArgumentMatchers.eq("session-1"), org.mockito.ArgumentMatchers.eq("generation-1"), org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.eq(1L));
-        verify(traceStore).recordRouting("generation-1", "CHAT");
+        verify(traceStore).recordRouting(org.mockito.ArgumentMatchers.eq("generation-1"), org.mockito.ArgumentMatchers.eq("CHAT"), org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.eq(1L));
         verify(sseService).send(org.mockito.ArgumentMatchers.eq("session-1"), any());
         verify(coordinator).release("session-1", "generation-1");
     }

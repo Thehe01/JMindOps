@@ -29,6 +29,8 @@ import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.ToolDefinition;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionSynchronizationUtils;
 
 import java.time.Duration;
 import java.util.List;
@@ -43,6 +45,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -241,6 +244,9 @@ class AgentCheckpointResumeTest {
      */
     @Test
     void approvalResumesSameGeneration() {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
         String approvalId = UUID.randomUUID().toString();
         String generationId = "gen-same-approval-resume";
         String sessionId = "session-hitl";
@@ -270,10 +276,24 @@ class AgentCheckpointResumeTest {
                 toolGovernanceService, null, resourceAccessService, generationTaskStore, agentResumeService
         );
 
-        controller.approve(approvalId);
+        try {
+            // Activate transaction synchronization (simulating Spring @Transactional environment)
+            TransactionSynchronizationManager.initSynchronization();
+            controller.approve(approvalId);
 
-        // Verify that resume was invoked with the exact same generationId
-        verify(agentResumeService, times(1)).resume(generationId);
+            // Before commit: resume MUST NOT have been called
+            verify(agentResumeService, never()).resume(anyString());
+
+            // Simulate database transaction COMMIT
+            TransactionSynchronizationUtils.triggerAfterCommit();
+
+            // After commit: verify async resume is invoked with the exact same generationId without sleep
+            verify(agentResumeService, timeout(5000).times(1)).resume(generationId);
+        } finally {
+            if (TransactionSynchronizationManager.isSynchronizationActive()) {
+                TransactionSynchronizationManager.clearSynchronization();
+            }
+        }
     }
 
     /**
@@ -790,6 +810,46 @@ class AgentCheckpointResumeTest {
         verify(taskStore, never()).markFailed(anyString(), anyString());
         verify(taskStore, never()).markFailed(anyString(), anyString(), anyLong(), anyString());
         verify(sseService, never()).send(eq(sessionId), any());
+    }
+
+    /**
+     * 13. 场景 M：审批检查严格基于 generation_id 与 tool_call_id，禁止仅凭 tool_name 跨 generation / toolCall 误命中。
+     */
+    @Test
+    void approvalDoesNotCrossMatchAcrossGenerationsOrToolCalls() {
+        JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
+        AgentCheckpointStore checkpointStore = new AgentCheckpointStore(jdbcTemplate);
+
+        String gen1 = "11111111-1111-1111-1111-111111111111";
+        String gen2 = "22222222-2222-2222-2222-222222222222";
+        String call1 = "call-1";
+        String call2 = "call-2";
+        String toolName = "sensitiveTool";
+
+        // When queried for gen1 + call1: return approval-id-1
+        when(jdbcTemplate.queryForList(
+                anyString(),
+                eq(String.class),
+                eq(gen1), eq(call1), eq(toolName), eq(toolName), eq(gen1)
+        )).thenReturn(List.of("approval-id-1"));
+
+        // When queried for gen2 + call1: return empty list
+        when(jdbcTemplate.queryForList(
+                anyString(),
+                eq(String.class),
+                eq(gen2), eq(call1), eq(toolName), eq(toolName), eq(gen2)
+        )).thenReturn(List.of());
+
+        // When queried for gen1 + call2: return empty list
+        when(jdbcTemplate.queryForList(
+                anyString(),
+                eq(String.class),
+                eq(gen1), eq(call2), eq(toolName), eq(toolName), eq(gen1)
+        )).thenReturn(List.of());
+
+        assertThat(checkpointStore.isToolApprovalGranted(gen1, call1, toolName)).isTrue();
+        assertThat(checkpointStore.isToolApprovalGranted(gen2, call1, toolName)).isFalse();
+        assertThat(checkpointStore.isToolApprovalGranted(gen1, call2, toolName)).isFalse();
     }
 
     private ChatClient mockChatClientWithFinalAnswer(String answer) {

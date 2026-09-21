@@ -66,6 +66,46 @@ class AgentTraceStoreTest {
         assertThat(stepUpdate.arguments()[1]).isEqualTo("存在无法关联结果的工具调用");
     }
 
+    @Test
+    void traceOperationsDoNotMutateHeartbeatOrCheckpointVersion() {
+        RecordingJdbcTemplate jdbcTemplate = new RecordingJdbcTemplate(sql -> 1);
+        AgentTraceStore store = new AgentTraceStore(jdbcTemplate);
+        String genId = "00000000-0000-0000-0000-000000000001";
+        String workerId = "worker-fenced";
+        long leaseVersion = 3L;
+
+        // 1. recordRouting
+        store.recordRouting(genId, "RAG_SEARCH", workerId, leaseVersion);
+
+        // 2. startStep
+        String stepId = store.startStep(genId, 1, workerId, leaseVersion);
+
+        // 3. completeThinking
+        store.completeThinking(genId, stepId, null, null, 100L, "gpt-4", workerId, leaseVersion);
+
+        // 4. completeTools
+        ToolResponseMessage message = ToolResponseMessage.builder()
+                .responses(List.of(new ToolResponseMessage.ToolResponse("call-1", "tool-1", "result")))
+                .build();
+        store.completeTools(genId, stepId, message, 50L, workerId, leaseVersion);
+
+        // Verify that NO SQL statement mutates heartbeat_at or checkpoint_version on generation_task
+        for (SqlCall call : jdbcTemplate.calls) {
+            if (call.sql().contains("generation_task")) {
+                assertThat(call.sql())
+                        .as("SQL updating generation_task must not touch checkpoint_version")
+                        .doesNotContain("checkpoint_version");
+                assertThat(call.sql())
+                        .as("SQL updating generation_task must not touch heartbeat_at")
+                        .doesNotContain("heartbeat_at");
+                assertThat(call.sql())
+                        .as("SQL updating generation_task must be fenced by worker_id and lease_version")
+                        .contains("worker_id = ?")
+                        .contains("lease_version = ?");
+            }
+        }
+    }
+
     private record SqlCall(String sql, Object[] arguments) {
     }
 
@@ -81,6 +121,15 @@ class AgentTraceStoreTest {
         public int update(String sql, Object... args) {
             calls.add(new SqlCall(sql, args));
             return result.applyAsInt(sql);
+        }
+
+        @Override
+        public <T> T queryForObject(String sql, Class<T> requiredType, Object... args) {
+            calls.add(new SqlCall(sql, args));
+            if (requiredType == String.class) {
+                return requiredType.cast(java.util.UUID.randomUUID().toString());
+            }
+            return null;
         }
     }
 }

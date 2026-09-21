@@ -90,7 +90,7 @@ public class ChatEventListener {
 
             // 2. 调用意图路由代理进行分类（使用重写后的文本）
             RoutingDecision decision = routerAgent.route(rewrittenInput);
-            agentTraceStore.recordRouting(generationId, decision.name());
+            agentTraceStore.recordRouting(generationId, decision.name(), workerId, leaseVersion);
             touchHeartbeatWithFencing(generationId, workerId, leaseVersion);
             log.info("Routing decision: sessionId={}, generationId={}, decision={}",
                     sessionId, generationId, decision);

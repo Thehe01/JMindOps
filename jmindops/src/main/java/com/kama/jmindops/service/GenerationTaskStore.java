@@ -163,6 +163,10 @@ public class GenerationTaskStore {
         return versions.get(0);
     }
 
+    /**
+     * @deprecated Use {@link #touchHeartbeat(String, String, long)} with fencing instead.
+     */
+    @Deprecated
     public void touchHeartbeat(String generationId) {
         jdbcTemplate.update("""
                 UPDATE generation_task SET heartbeat_at = NOW(), updated_at = NOW()
@@ -174,11 +178,15 @@ public class GenerationTaskStore {
         return jdbcTemplate.update("""
                 UPDATE generation_task SET heartbeat_at = NOW(), updated_at = NOW()
                 WHERE id = CAST(? AS uuid) AND status = 'RUNNING'
-                  AND (worker_id = ? OR worker_id IS NULL)
+                  AND worker_id = ?
                   AND lease_version = ?
                 """, generationId, workerId, leaseVersion) == 1;
     }
 
+    /**
+     * @deprecated Use {@link #markSucceeded(String, String, long)} with fencing instead.
+     */
+    @Deprecated
     public boolean markSucceeded(String generationId) {
         return jdbcTemplate.update("""
                 UPDATE generation_task
@@ -194,7 +202,7 @@ public class GenerationTaskStore {
                 SET status = 'SUCCEEDED', completed_at = COALESCE(completed_at, NOW()), heartbeat_at = NOW(),
                     last_error = NULL, updated_at = NOW()
                 WHERE id = CAST(? AS uuid) AND status IN ('RUNNING', 'SUCCEEDED')
-                  AND (worker_id = ? OR worker_id IS NULL)
+                  AND worker_id = ?
                   AND lease_version = ?
                 """, generationId, workerId, leaseVersion);
         if (updated == 0) {
@@ -209,7 +217,7 @@ public class GenerationTaskStore {
                 UPDATE generation_task
                 SET status = 'WAITING_APPROVAL', heartbeat_at = NOW(), updated_at = NOW()
                 WHERE id = CAST(? AS uuid) AND status IN ('RUNNING', 'WAITING_APPROVAL')
-                  AND (worker_id = ? OR worker_id IS NULL)
+                  AND worker_id = ?
                   AND lease_version = ?
                 """, generationId, workerId, leaseVersion);
         if (updated == 0) {
@@ -219,6 +227,10 @@ public class GenerationTaskStore {
         return true;
     }
 
+    /**
+     * @deprecated Use {@link #markFailed(String, String, long, String)} with fencing instead.
+     */
+    @Deprecated
     public boolean markFailed(String generationId, String errorMessage) {
         return jdbcTemplate.update("""
                 UPDATE generation_task
@@ -234,8 +246,8 @@ public class GenerationTaskStore {
                 SET status = 'FAILED', completed_at = NOW(), heartbeat_at = NOW(),
                     last_error = ?, updated_at = NOW()
                 WHERE id = CAST(? AS uuid) AND status IN ('PENDING', 'RUNNING', 'WAITING_APPROVAL')
-                  AND (worker_id = ? OR worker_id IS NULL)
-                  AND (lease_version = ? OR lease_version = 0)
+                  AND worker_id = ?
+                  AND lease_version = ?
                 """, sanitizeError(errorMessage), generationId, workerId, leaseVersion) == 1;
     }
 
