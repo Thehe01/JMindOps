@@ -3,7 +3,7 @@ package com.kama.jmindops.agent;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.chat.client.ChatClient;
+import com.kama.jmindops.ai.ChatClient;
 import org.springframework.stereotype.Component;
 
 import java.util.function.Function;
@@ -24,7 +24,7 @@ public class StructuredPromptExecutor {
     /**
      * 带自愈重试的结构化 Prompt 执行方法
      *
-     * @param chatClient        Spring AI ChatClient 实例
+     * @param chatClient        application ChatClient 实例
      * @param systemPrompt      初始系统提示词
      * @param userPrompt        用户输入提示词
      * @param parser            结构化解析函数（解析失败需抛出异常或返回 null）

@@ -1,7 +1,7 @@
 package com.kama.jmindops.agent;
 
-import org.springframework.ai.tool.ToolCallback;
-import org.springframework.ai.tool.ToolCallbackProvider;
+import com.kama.jmindops.ai.ToolCallback;
+import com.kama.jmindops.ai.ToolCallbackProvider;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 

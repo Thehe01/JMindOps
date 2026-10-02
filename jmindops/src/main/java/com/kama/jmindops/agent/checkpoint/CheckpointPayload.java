@@ -3,12 +3,12 @@ package com.kama.jmindops.agent.checkpoint;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.ai.chat.messages.AssistantMessage;
-import org.springframework.ai.chat.messages.AssistantMessageFactory;
-import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.chat.messages.SystemMessage;
-import org.springframework.ai.chat.messages.ToolResponseMessage;
-import org.springframework.ai.chat.messages.UserMessage;
+import com.kama.jmindops.ai.AssistantMessage;
+import com.kama.jmindops.ai.AssistantMessageFactory;
+import com.kama.jmindops.ai.Message;
+import com.kama.jmindops.ai.SystemMessage;
+import com.kama.jmindops.ai.ToolResponseMessage;
+import com.kama.jmindops.ai.UserMessage;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -46,7 +46,7 @@ public final class CheckpointPayload {
     ) {}
 
     /**
-     * 将 Spring AI 的 Message 序列化为不含隐藏私有思考 (CoT) 的安全快照。
+     * 将 项目自有 Message 序列化为不含隐藏私有思考 (CoT) 的安全快照。
      */
     public static String serializeMessages(List<Message> messages) {
         if (messages == null) {
@@ -85,7 +85,7 @@ public final class CheckpointPayload {
     }
 
     /**
-     * 将 Checkpoint 消息快照反序列化为 Spring AI Message 列表。
+     * 将 Checkpoint 消息快照反序列化为 项目自有 Message 列表。
      */
     public static List<Message> deserializeMessages(String payload) {
         if (payload == null || payload.isBlank()) {

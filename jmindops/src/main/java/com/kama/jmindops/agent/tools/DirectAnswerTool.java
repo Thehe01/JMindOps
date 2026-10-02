@@ -21,9 +21,9 @@ public class DirectAnswerTool implements Tool {
         return ToolType.FIXED;
     }
 
-    @org.springframework.ai.tool.annotation.Tool(
+    @dev.langchain4j.agent.tool.Tool(
             name = "directAnswer",
-            description = "用于直接回答用户问题，适用于无需生成任务计划或调用其他工具的场景。"
+            value = "用于直接回答用户问题，适用于无需生成任务计划或调用其他工具的场景。"
     )
     public void directAnswer() {}
 }

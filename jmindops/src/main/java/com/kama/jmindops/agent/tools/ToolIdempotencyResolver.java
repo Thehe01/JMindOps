@@ -1,6 +1,6 @@
 package com.kama.jmindops.agent.tools;
 
-import org.springframework.ai.tool.ToolCallback;
+import com.kama.jmindops.ai.ToolCallback;
 import org.springframework.core.annotation.AnnotatedElementUtils;
 import org.springframework.stereotype.Component;
 

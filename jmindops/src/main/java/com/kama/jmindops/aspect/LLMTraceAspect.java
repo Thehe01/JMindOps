@@ -6,8 +6,8 @@ import org.slf4j.LoggerFactory;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
-import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.ai.chat.prompt.Prompt;
+import com.kama.jmindops.ai.ChatResponse;
+import com.kama.jmindops.ai.Prompt;
 import org.springframework.stereotype.Component;
 
 
@@ -17,8 +17,8 @@ public class LLMTraceAspect {
     private static final Logger log = LoggerFactory.getLogger(LLMTraceAspect.class);
 
 
-    // 拦截实现了 ChatModel 接口的 call 方法
-    @Around("execution(* org.springframework.ai.chat.model.ChatModel.call(org.springframework.ai.chat.prompt.Prompt))")
+    // The facade passes its proxied instance to request objects, so model calls cross this boundary.
+    @Around("execution(* com.kama.jmindops.ai.ChatClient.callModel(com.kama.jmindops.ai.Prompt))")
     public Object traceLLMCall(ProceedingJoinPoint joinPoint) throws Throwable {
         long startTime = System.currentTimeMillis();
         

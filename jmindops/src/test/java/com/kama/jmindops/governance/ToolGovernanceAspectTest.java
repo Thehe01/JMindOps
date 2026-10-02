@@ -3,7 +3,7 @@ package com.kama.jmindops.governance;
 import com.kama.jmindops.agent.tools.DataBaseTools;
 import org.aspectj.lang.reflect.MethodSignature;
 import org.junit.jupiter.api.Test;
-import org.springframework.ai.tool.annotation.Tool;
+import dev.langchain4j.agent.tool.Tool;
 import org.springframework.aop.aspectj.annotation.AspectJProxyFactory;
 import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.jdbc.core.JdbcTemplate;

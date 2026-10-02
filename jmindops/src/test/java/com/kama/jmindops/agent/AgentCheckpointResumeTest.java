@@ -18,15 +18,15 @@ import com.kama.jmindops.service.GenerationTaskRecovery;
 import com.kama.jmindops.service.GenerationTaskStore;
 import com.kama.jmindops.service.SseService;
 import org.junit.jupiter.api.Test;
-import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.messages.AssistantMessage;
-import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.chat.messages.UserMessage;
-import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.ai.chat.model.Generation;
-import org.springframework.ai.chat.prompt.Prompt;
-import org.springframework.ai.tool.ToolCallback;
-import org.springframework.ai.tool.definition.ToolDefinition;
+import com.kama.jmindops.ai.ChatClient;
+import com.kama.jmindops.ai.AssistantMessage;
+import com.kama.jmindops.ai.Message;
+import com.kama.jmindops.ai.UserMessage;
+import com.kama.jmindops.ai.ChatResponse;
+import com.kama.jmindops.ai.Generation;
+import com.kama.jmindops.ai.Prompt;
+import com.kama.jmindops.ai.ToolCallback;
+import com.kama.jmindops.ai.ToolDefinition;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -120,7 +120,7 @@ class AgentCheckpointResumeTest {
         runtime.run();
 
         // 1. Tool A was executed with the restored arguments
-        verify(toolA, times(1)).call(eq("{\"arg\":\"val\"}"), any(org.springframework.ai.chat.model.ToolContext.class));
+        verify(toolA, times(1)).call(eq("{\"arg\":\"val\"}"), any(com.kama.jmindops.ai.ToolContext.class));
         // 2. ChatClient prompt was called ONLY once (for step 2 to generate the final answer), NOT twice (step 1 was resumed without duplicate model call)
         verify(chatClient, times(1)).prompt(any(Prompt.class));
         // 3. Agent completed successfully
@@ -209,7 +209,7 @@ class AgentCheckpointResumeTest {
         verify(toolA, never()).call(anyString(), any());
         verify(toolA, never()).call(anyString());
         // toolB WAS invoked once
-        verify(toolB, times(1)).call(eq("{\"key\":\"b\"}"), any(org.springframework.ai.chat.model.ToolContext.class));
+        verify(toolB, times(1)).call(eq("{\"key\":\"b\"}"), any(com.kama.jmindops.ai.ToolContext.class));
         assertThat(runtime.getAgentState()).isEqualTo(AgentState.FINISHED);
     }
 

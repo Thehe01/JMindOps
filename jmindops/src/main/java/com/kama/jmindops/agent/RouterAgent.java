@@ -6,7 +6,7 @@ import org.slf4j.LoggerFactory;
 import com.kama.jmindops.config.ChatClientRegistry;
 import com.kama.jmindops.model.dto.ChatMessageDTO;
 import com.kama.jmindops.service.ChatMessageFacadeService;
-import org.springframework.ai.chat.client.ChatClient;
+import com.kama.jmindops.ai.ChatClient;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;

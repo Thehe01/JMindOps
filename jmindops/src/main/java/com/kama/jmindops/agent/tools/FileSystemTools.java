@@ -53,9 +53,9 @@ public class FileSystemTools implements Tool {
      * @param filePath 文件路径（相对于工作目录）
      * @return 文件内容
      */
-    @org.springframework.ai.tool.annotation.Tool(
+    @dev.langchain4j.agent.tool.Tool(
             name = "readFile",
-            description = "读取指定文件的内容。参数：filePath - 文件路径（相对于工作目录）"
+            value = "读取指定文件的内容。参数：filePath - 文件路径（相对于工作目录）"
     )
     public String readFile(String filePath) {
         try {
@@ -95,9 +95,9 @@ public class FileSystemTools implements Tool {
      * @param content  要写入的内容
      * @return 操作结果
      */
-    @org.springframework.ai.tool.annotation.Tool(
+    @dev.langchain4j.agent.tool.Tool(
             name = "writeFile",
-            description = "将内容写入指定文件。如果文件不存在则创建，如果文件存在则覆盖。参数：filePath - 文件路径（相对于工作目录），content - 要写入的内容"
+            value = "将内容写入指定文件。如果文件不存在则创建，如果文件存在则覆盖。参数：filePath - 文件路径（相对于工作目录），content - 要写入的内容"
     )
     @RequiresToolApproval
     public String writeFile(String filePath, String content) {
@@ -135,9 +135,9 @@ public class FileSystemTools implements Tool {
      * @param content  要追加的内容
      * @return 操作结果
      */
-    @org.springframework.ai.tool.annotation.Tool(
+    @dev.langchain4j.agent.tool.Tool(
             name = "appendToFile",
-            description = "将内容追加到指定文件的末尾。如果文件不存在则创建。参数：filePath - 文件路径（相对于工作目录），content - 要追加的内容"
+            value = "将内容追加到指定文件的末尾。如果文件不存在则创建。参数：filePath - 文件路径（相对于工作目录），content - 要追加的内容"
     )
     @RequiresToolApproval
     public String appendToFile(String filePath, String content) {
@@ -174,9 +174,9 @@ public class FileSystemTools implements Tool {
      * @param directoryPath 目录路径（相对于工作目录），如果为空则列出当前目录
      * @return 目录内容列表
      */
-    @org.springframework.ai.tool.annotation.Tool(
+    @dev.langchain4j.agent.tool.Tool(
             name = "listFiles",
-            description = "列出指定目录中的文件和子目录。参数：directoryPath - 目录路径（相对于工作目录），如果为空则列出当前目录"
+            value = "列出指定目录中的文件和子目录。参数：directoryPath - 目录路径（相对于工作目录），如果为空则列出当前目录"
     )
     public String listFiles(String directoryPath) {
         try {
@@ -240,9 +240,9 @@ public class FileSystemTools implements Tool {
      * @param path 文件或目录路径（相对于工作目录）
      * @return 操作结果
      */
-    @org.springframework.ai.tool.annotation.Tool(
+    @dev.langchain4j.agent.tool.Tool(
             name = "deleteFile",
-            description = "删除指定的文件或目录。参数：path - 文件或目录路径（相对于工作目录）"
+            value = "删除指定的文件或目录。参数：path - 文件或目录路径（相对于工作目录）"
     )
     @RequiresToolApproval
     public String deleteFile(String path) {
@@ -294,9 +294,9 @@ public class FileSystemTools implements Tool {
      * @param directoryPath 目录路径（相对于工作目录）
      * @return 操作结果
      */
-    @org.springframework.ai.tool.annotation.Tool(
+    @dev.langchain4j.agent.tool.Tool(
             name = "createDirectory",
-            description = "创建指定目录，如果父目录不存在则一并创建。参数：directoryPath - 目录路径（相对于工作目录）"
+            value = "创建指定目录，如果父目录不存在则一并创建。参数：directoryPath - 目录路径（相对于工作目录）"
     )
     @RequiresToolApproval
     public String createDirectory(String directoryPath) {

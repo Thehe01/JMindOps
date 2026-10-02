@@ -1,12 +1,12 @@
 package com.kama.jmindops.agent;
 
 import org.junit.jupiter.api.Test;
-import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.messages.ToolResponseMessage;
-import org.springframework.ai.chat.messages.UserMessage;
-import org.springframework.ai.model.tool.ToolCallingChatOptions;
-import org.springframework.ai.tool.ToolCallback;
-import org.springframework.ai.tool.definition.ToolDefinition;
+import com.kama.jmindops.ai.ChatClient;
+import com.kama.jmindops.ai.ToolResponseMessage;
+import com.kama.jmindops.ai.UserMessage;
+import com.kama.jmindops.ai.ToolCallingChatOptions;
+import com.kama.jmindops.ai.ToolCallback;
+import com.kama.jmindops.ai.ToolDefinition;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;

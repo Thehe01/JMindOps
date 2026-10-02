@@ -1,6 +1,6 @@
 package com.kama.jmindops.config;
 
-import org.springframework.ai.chat.client.ChatClient;
+import com.kama.jmindops.ai.ChatClient;
 import org.springframework.stereotype.Component;
 
 import java.util.Collections;

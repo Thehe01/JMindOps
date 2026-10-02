@@ -24,7 +24,7 @@ public class DateTool implements Tool {
         return ToolType.OPTIONAL;
     }
 
-    @org.springframework.ai.tool.annotation.Tool(name = "getDate", description = "获取当前的日期")
+    @dev.langchain4j.agent.tool.Tool(name = "getDate", value = "获取当前的日期")
     public String getDate() {
         return LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd"));
     }

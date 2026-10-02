@@ -10,9 +10,9 @@ import com.kama.jmindops.model.response.CreateChatMessageResponse;
 import com.kama.jmindops.model.vo.ChatMessageVO;
 import com.kama.jmindops.service.ChatMessageFacadeService;
 import com.kama.jmindops.service.SseService;
-import org.springframework.ai.chat.messages.AssistantMessage;
-import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.chat.messages.ToolResponseMessage;
+import com.kama.jmindops.ai.AssistantMessage;
+import com.kama.jmindops.ai.Message;
+import com.kama.jmindops.ai.ToolResponseMessage;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 
@@ -45,25 +45,8 @@ public class AgentMessageListener {
                     .toolCalls(assistantMessage.getToolCalls());
 
             if (event.getUsage() != null) {
-                Long promptTokens = 0L;
-                Long completionTokens = 0L;
-                
-                // Safe extraction of prompt tokens (could be Integer or Long depending on Spring AI version)
-                try {
-                    Object pt = event.getUsage().getClass().getMethod("getPromptTokens").invoke(event.getUsage());
-                    if (pt instanceof Number num) promptTokens = num.longValue();
-                } catch (Exception ignored) {}
-
-                // Safe extraction of completion tokens (method name changed across Spring AI versions)
-                try {
-                    Object ct = event.getUsage().getClass().getMethod("getGenerationTokens").invoke(event.getUsage());
-                    if (ct instanceof Number num) completionTokens = num.longValue();
-                } catch (Exception ignored) {
-                    try {
-                        Object ct = event.getUsage().getClass().getMethod("getCompletionTokens").invoke(event.getUsage());
-                        if (ct instanceof Number num) completionTokens = num.longValue();
-                    } catch (Exception ignored2) {}
-                }
+                long promptTokens = event.getUsage().getPromptTokens() == null ? 0L : event.getUsage().getPromptTokens();
+                long completionTokens = event.getUsage().getGenerationTokens() == null ? 0L : event.getUsage().getGenerationTokens();
 
                 if (promptTokens > 0 || completionTokens > 0) {
                     metaDataBuilder.usage(ChatMessageDTO.TokenUsage.builder()

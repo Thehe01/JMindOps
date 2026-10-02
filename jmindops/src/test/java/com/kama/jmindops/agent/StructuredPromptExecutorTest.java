@@ -3,7 +3,7 @@ package com.kama.jmindops.agent;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
-import org.springframework.ai.chat.client.ChatClient;
+import com.kama.jmindops.ai.ChatClient;
 
 import java.util.concurrent.atomic.AtomicInteger;
 

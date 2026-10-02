@@ -17,21 +17,17 @@ import com.kama.jmindops.service.AgentCheckpointStore;
 import com.kama.jmindops.service.AgentTraceStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.memory.ChatMemory;
-import org.springframework.ai.chat.memory.MessageWindowChatMemory;
-import org.springframework.ai.chat.messages.AssistantMessage;
-import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.chat.messages.SystemMessage;
-import org.springframework.ai.chat.messages.ToolResponseMessage;
-import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.ai.chat.prompt.ChatOptions;
-import org.springframework.ai.chat.prompt.Prompt;
-import org.springframework.ai.model.tool.DefaultToolCallingChatOptions;
-import org.springframework.ai.model.tool.ToolCallingChatOptions;
-import org.springframework.ai.model.tool.ToolCallingManager;
-import org.springframework.ai.model.tool.ToolExecutionResult;
-import org.springframework.ai.tool.ToolCallback;
+import com.kama.jmindops.ai.ChatClient;
+import com.kama.jmindops.ai.ChatMemory;
+import com.kama.jmindops.ai.MessageWindowChatMemory;
+import com.kama.jmindops.ai.AssistantMessage;
+import com.kama.jmindops.ai.Message;
+import com.kama.jmindops.ai.SystemMessage;
+import com.kama.jmindops.ai.ToolResponseMessage;
+import com.kama.jmindops.ai.ChatResponse;
+import com.kama.jmindops.ai.ToolCallingChatOptions;
+import com.kama.jmindops.ai.Prompt;
+import com.kama.jmindops.ai.ToolCallback;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.util.Assert;
 import org.springframework.util.StringUtils;
@@ -88,16 +84,14 @@ public class JMindOps {
     private int retrievedSourceCount;
     // 可访问的知识库
     private List<KnowledgeBaseDTO> availableKbs;
-    // 工具调用管理器
-    private ToolCallingManager toolCallingManager;
     // 模型的聊天记录
     private ChatMemory chatMemory;
     // 模型的聊天会话 ID
     private String chatSessionId;
     // 单次生成标识，用于隔离同一会话中的 SSE 事件
     private String generationId;
-    // SpringAI 自带的 ChatOptions
-    private ChatOptions chatOptions;
+    // 项目自有的模型请求设置
+    private ToolCallingChatOptions chatOptions;
     // 事件发布器
     private ApplicationEventPublisher eventPublisher;
     // 最后一次的 ChatResponse
@@ -212,9 +206,8 @@ public class JMindOps {
             this.chatMemory.add(chatSessionId, new SystemMessage(systemPrompt));
         }
 
-        // 关闭 SpringAI 自带的内部的工具调用自动执行功能
-        var optionsBuilder = DefaultToolCallingChatOptions.builder()
-                .internalToolExecutionEnabled(false);
+        // LangChain4j 只返回工具调用；执行统一通过本项目治理与账本。
+        var optionsBuilder = ToolCallingChatOptions.builder();
         if (temperature != null) {
             optionsBuilder.temperature(temperature);
         }
@@ -223,9 +216,6 @@ public class JMindOps {
         }
         this.chatOptions = optionsBuilder.build();
         synchronizeToolCallbacks();
-
-        // 工具调用管理器
-        this.toolCallingManager = ToolCallingManager.builder().build();
     }
 
     public AgentState getAgentState() {
@@ -269,7 +259,7 @@ public class JMindOps {
     }
 
     // 持久化 Message, 返回 chatMessageId
-    private void saveMessage(Message message, org.springframework.ai.chat.metadata.Usage usage, Long latencyMs, String modelName) {
+    private void saveMessage(Message message, com.kama.jmindops.ai.Usage usage, Long latencyMs, String modelName) {
         if (eventPublisher != null) {
             eventPublisher.publishEvent(new AgentMessageGeneratedEvent(
                     this, this.chatSessionId, this.generationId, message, usage, latencyMs, modelName));
@@ -315,7 +305,7 @@ public class JMindOps {
         StringBuilder fullContent = new StringBuilder();
         java.util.Map<String, StringBuilder> toolCallArguments = new LinkedHashMap<>();
         java.util.Map<String, String> toolCallNames = new LinkedHashMap<>();
-        org.springframework.ai.chat.metadata.ChatResponseMetadata[] lastMetadata = new org.springframework.ai.chat.metadata.ChatResponseMetadata[1];
+        com.kama.jmindops.ai.ChatResponseMetadata[] lastMetadata = new com.kama.jmindops.ai.ChatResponseMetadata[1];
 
         responseFlux.doOnNext(chunk -> {
             if (chunk.getMetadata() != null) {
@@ -369,14 +359,14 @@ public class JMindOps {
             finalContent = RagAnswerPolicy.enforceValidCitations(finalContent, retrievedSourceCount);
             publishChunk(finalContent);
         }
-        AssistantMessage aggregatedMessage = org.springframework.ai.chat.messages.AssistantMessageFactory.create(finalContent, new java.util.HashMap<>(), finalToolCalls);
-        this.lastChatResponse = new ChatResponse(List.of(new org.springframework.ai.chat.model.Generation(aggregatedMessage)), lastMetadata[0]);
+        AssistantMessage aggregatedMessage = com.kama.jmindops.ai.AssistantMessageFactory.create(finalContent, new java.util.HashMap<>(), finalToolCalls);
+        this.lastChatResponse = new ChatResponse(List.of(new com.kama.jmindops.ai.Generation(aggregatedMessage)), lastMetadata[0]);
 
         long costTime = System.currentTimeMillis() - startTime;
 
         Assert.notNull(lastChatResponse, "Last chat client response cannot be null");
 
-        org.springframework.ai.chat.metadata.Usage usage = null;
+        com.kama.jmindops.ai.Usage usage = null;
         String modelName = null;
         boolean tokenBudgetExceeded = false;
         if (this.lastChatResponse.getMetadata() != null) {
@@ -502,8 +492,8 @@ public class JMindOps {
                         if (checkpointStore != null) {
                             checkpointStore.assertActiveLease(this.generationId, this.workerId, this.leaseVersion);
                         }
-                        org.springframework.ai.chat.model.ToolContext toolContext =
-                                new org.springframework.ai.chat.model.ToolContext(Map.of(
+                        com.kama.jmindops.ai.ToolContext toolContext =
+                                new com.kama.jmindops.ai.ToolContext(Map.of(
                                         "tool_call_id", toolCallId,
                                         "generation_id", this.generationId,
                                         "idempotency_key", toolCallId
@@ -762,8 +752,8 @@ public class JMindOps {
     }
 
     private void synchronizeToolCallbacks() {
-        if (this.chatOptions instanceof ToolCallingChatOptions toolCallingOptions) {
-            toolCallingOptions.setToolCallbacks(List.copyOf(this.availableTools));
+        if (this.chatOptions != null) {
+            this.chatOptions.setToolCallbacks(List.copyOf(this.availableTools));
         }
     }
 
@@ -816,7 +806,7 @@ public class JMindOps {
             String arguments = knowledgeArguments(knowledgeBase.getId(), requiredKnowledgeQuery);
             AssistantMessage.ToolCall toolCall = new AssistantMessage.ToolCall(
                 toolCallId, "function", KNOWLEDGE_TOOL_NAME, arguments);
-            AssistantMessage toolCallMessage = org.springframework.ai.chat.messages.AssistantMessageFactory.create(
+            AssistantMessage toolCallMessage = com.kama.jmindops.ai.AssistantMessageFactory.create(
                     "", new java.util.HashMap<>(), List.of(toolCall));
 
             this.chatMemory.add(this.chatSessionId, toolCallMessage);

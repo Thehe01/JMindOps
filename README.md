@@ -2,7 +2,7 @@
 
 JMindOps 不是一个只会“接模型、套聊天页面”的 Agent Demo，而是一个围绕 **可治理、可恢复、可评测** 三个工程问题构建的智能运维与知识协同平台。
 
-它使用 Spring AI 实现可控的 ReAct 单步循环，支持动态 Agent 装配、混合检索 RAG、敏感工具审批和 SSE 流式交互；同时把每轮生成建模为持久任务，用幂等键、事务后派发、Redis single-flight 和恢复扫描处理重复请求、进程中断与事件丢失。V8 进一步把路由、每轮思考和工具调用保存为脱敏 Trace；V10～V11 引入 PostgreSQL Durable Document Index Task 实现高可用异步文档解析与分块索引；V12 进一步实现 Agent Step Checkpoint、Execution Ledger、WAITING_APPROVAL 挂起以及原位恢复（Same-Generation Resume）。
+它使用 LangChain4j 接入模型与工具，在项目自有运行时中实现可控的 ReAct 单步循环，支持动态 Agent 装配、混合检索 RAG、敏感工具审批和 SSE 流式交互；同时把每轮生成建模为持久任务，用幂等键、事务后派发、Redis single-flight 和恢复扫描处理重复请求、进程中断与事件丢失。V8 进一步把路由、每轮思考和工具调用保存为脱敏 Trace；V10～V11 引入 PostgreSQL Durable Document Index Task 实现高可用异步文档解析与分块索引；V12 进一步实现 Agent Step Checkpoint、Execution Ledger、WAITING_APPROVAL 挂起以及原位恢复（Same-Generation Resume）。框架替换的配置与兼容说明见 [LangChain4j 迁移说明](docs/migration/langchain4j.md)。
 
 ## 核心架构
 
@@ -107,7 +107,7 @@ python scripts/score-agent-eval.py `
 
 - JWT 身份认证与用户级资源所有权校验覆盖 Agent、会话和知识库；管理员权限会查库确认，降低 token 有效期内降权失效风险。
 - 外部消息的 role 和 metadata 由服务端生成，客户端不能伪造 Assistant、工具调用或 Token 用量。
-- 高风险工具默认关闭；启用后仍需要管理员绑定与用户审批。审批在 Spring AI 的统一 `ToolCallback` 执行边界强制，AOP 作为直接方法调用的兜底，避免代理层级或反射调用绕过治理；审批严格绑定 `generationId`、`toolCallId`、用户、会话与参数指纹，杜绝未隔离回退与跨代重放，并以条件更新/行锁保证单次消费；工具执行前强制校验租约（Lease Fencing），Stale Worker 无法提交副作用。
+- 高风险工具默认关闭；启用后仍需要管理员绑定与用户审批。审批在项目自有的统一 `ToolCallback` 执行边界强制，AOP 作为直接方法调用的兜底；LangChain4j 只生成工具调用和解析参数，工具执行仍由治理与账本控制。审批严格绑定 `generationId`、`toolCallId`、用户、会话与参数指纹，杜绝未隔离回退与跨代重放，并以条件更新/行锁保证单次消费；工具执行前强制校验租约（Lease Fencing），Stale Worker 无法提交副作用。
 - 工具内部校验之外还有调用前策略层：破坏性 SQL 与凭证外传请求会直接撤销相关工具；跨 RAG/文件任务只暴露只读回调，避免把“最终会拒绝”当成最小权限。
 - 文件工具默认关闭，并锁定到配置的工作区根目录；拒绝绝对路径、隐藏路径、路径穿越和符号链接越界，限制读写大小，所有写入、追加、建目录和删除都需要审批。
 - 数据库工具只允许受限 SELECT，并禁止访问鉴权、审批、生成任务、审计和 PostgreSQL 凭证表；生产环境仍建议使用独立只读数据源。
@@ -119,7 +119,7 @@ python scripts/score-agent-eval.py `
 | 层级 | 技术 |
 | --- | --- |
 | 前端 | React 19、TypeScript、Vite、Ant Design、fetch-stream SSE |
-| 后端 | Java 17、Spring Boot 3.5、Spring AI 1.1、MyBatis、WebClient |
+| 后端 | Java 17、Spring Boot 3.5、LangChain4j 1.20.2、MyBatis、WebClient |
 | 数据 | PostgreSQL 15（JDBC 42.7.13）、pgvector、ParadeDB pg_search（Jieba + BM25）、JSONB、Flyway、Redis 7 |
 | AI | DeepSeek、智谱 GLM、Google Gemini、本地 Ollama/Qwen2.5、BGE-M3、可选 Reranker、MCP |
 | 工程化 | Docker Compose、Nginx、ToolCallback 治理、AOP Trace、JUnit 5、Mockito |
@@ -142,10 +142,10 @@ Compose 默认只启动带 pgvector/pg_search 的 PostgreSQL 15、Redis、Spring
 
 ### 可选：使用本地 Ollama Chat
 
-项目默认 `SPRING_AI_MODEL_CHAT=none`，不会在未配置时连接本地模型；云模型仍根据各自 API Key 注册。确认 Ollama 已安装 `qwen2.5` 后，可显式切换：
+项目默认 `APP_AI_CHAT_PROVIDER=none`，不会在未配置时连接本地模型；云模型仍根据各自 API Key 注册。旧环境变量 `SPRING_AI_MODEL_CHAT` 可作为兼容回退。确认 Ollama 已安装 `qwen2.5` 后，可显式切换：
 
 ```powershell
-$env:SPRING_AI_MODEL_CHAT = "ollama"
+$env:APP_AI_CHAT_PROVIDER = "ollama"
 $env:OLLAMA_CHAT_BASE_URL = "http://localhost:11434"
 $env:OLLAMA_CHAT_MODEL = "qwen2.5"
 cd jmindops
