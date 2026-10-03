@@ -4,17 +4,14 @@ package com.kama.jmindops.agent.examples;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.kama.jmindops.agent.AgentState;
-import org.springframework.ai.chat.messages.AssistantMessage;
-import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.chat.messages.ToolResponseMessage;
-import org.springframework.ai.chat.messages.UserMessage;
-import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.ai.chat.prompt.ChatOptions;
-import org.springframework.ai.chat.prompt.Prompt;
-import org.springframework.ai.model.tool.DefaultToolCallingChatOptions;
-import org.springframework.ai.model.tool.ToolCallingManager;
-import org.springframework.ai.model.tool.ToolExecutionResult;
-import org.springframework.ai.tool.ToolCallback;
+import com.kama.jmindops.ai.AssistantMessage;
+import com.kama.jmindops.ai.Message;
+import com.kama.jmindops.ai.ToolResponseMessage;
+import com.kama.jmindops.ai.UserMessage;
+import com.kama.jmindops.ai.ChatResponse;
+import com.kama.jmindops.ai.ToolCallingChatOptions;
+import com.kama.jmindops.ai.Prompt;
+import com.kama.jmindops.ai.ToolCallback;
 import org.springframework.util.Assert;
 
 import java.util.List;
@@ -40,10 +37,9 @@ public class JMindOpsV2 extends JMindOpsV1 {
     protected List<ToolCallback> availableTools;
     
     // 工具调用管理器
-    protected ToolCallingManager toolCallingManager;
     
-    // ChatOptions
-    protected ChatOptions chatOptions;
+    // ToolCallingChatOptions
+    protected ToolCallingChatOptions chatOptions;
     
     // 最后一次的 ChatResponse
     protected ChatResponse lastChatResponse;
@@ -58,21 +54,17 @@ public class JMindOpsV2 extends JMindOpsV1 {
     public JMindOpsV2(String name,
                       String description,
                       String systemPrompt,
-                      org.springframework.ai.chat.client.ChatClient chatClient,
+                      com.kama.jmindops.ai.ChatClient chatClient,
                       Integer maxMessages,
                       String sessionId,
                       List<ToolCallback> availableTools) {
         super(name, description, systemPrompt, chatClient, maxMessages, sessionId);
         this.availableTools = availableTools;
         
-        // 关闭 SpringAI 自带的内部工具调用自动执行功能
+        // LangChain4j 只返回工具调用，由本例显式执行。
         // 我们需要手动控制工具调用的执行流程
-        this.chatOptions = DefaultToolCallingChatOptions.builder()
-                .internalToolExecutionEnabled(false)
-                .build();
+        this.chatOptions = ToolCallingChatOptions.builder().build();
         
-        // 初始化工具调用管理器
-        this.toolCallingManager = ToolCallingManager.builder().build();
     }
     
     /**
@@ -120,7 +112,6 @@ public class JMindOpsV2 extends JMindOpsV1 {
                 .system(thinkPrompt)
                 .toolCallbacks(availableTools != null ? availableTools.toArray(new ToolCallback[0]) : new ToolCallback[0])
                 .call()
-                .chatClientResponse()
                 .chatResponse();
         
         Assert.notNull(lastChatResponse, "Last chat response cannot be null");
@@ -154,37 +145,18 @@ public class JMindOpsV2 extends JMindOpsV1 {
             return;
         }
         
-        // 构建提示词，包含当前的对话历史
-        // 注意：此时 chatMemory 中还没有带有 tool_calls 的 AssistantMessage
-        // ToolCallingManager.executeToolCalls() 会从 lastChatResponse 中获取 AssistantMessage
-        // 并将其添加到对话历史中
-        Prompt prompt = Prompt.builder()
-                .messages(chatMemory.get(sessionId))
-                .chatOptions(this.chatOptions)
-                .build();
-        
-        // 执行工具调用
-        // ToolCallingManager.executeToolCalls() 会：
-        // 1. 从 prompt 中获取当前的对话历史
-        // 2. 从 lastChatResponse 中获取带有 tool_calls 的 AssistantMessage，并添加到对话历史
-        // 3. 执行工具调用
-        // 4. 添加 ToolResponseMessage 到对话历史
-        // toolExecutionResult.conversationHistory() 会包含完整的对话历史：
-        // - 之前的对话历史
-        // - 带有 tool_calls 的 AssistantMessage
-        // - ToolResponseMessage（工具调用结果）
-        ToolExecutionResult toolExecutionResult = toolCallingManager.executeToolCalls(prompt, this.lastChatResponse);
-        
-        // 更新记忆：清除旧记忆，添加新的对话历史（包含工具调用结果）
-        // 这样确保对话历史中，带有 tool_calls 的 AssistantMessage 后面一定有对应的 ToolResponseMessage
-        chatMemory.clear(sessionId);
-        chatMemory.add(sessionId, toolExecutionResult.conversationHistory());
-        
-        // 获取工具响应消息
-        ToolResponseMessage toolResponseMessage = (ToolResponseMessage) toolExecutionResult
-                .conversationHistory()
-                .get(toolExecutionResult.conversationHistory().size() - 1);
-        
+        AssistantMessage assistant = lastChatResponse.getResult().getOutput();
+        List<ToolResponseMessage.ToolResponse> responses = new java.util.ArrayList<>();
+        for (AssistantMessage.ToolCall call : assistant.getToolCalls()) {
+            ToolCallback callback = availableTools.stream()
+                    .filter(tool -> tool.getToolDefinition().name().equals(call.name()))
+                    .findFirst().orElseThrow(() -> new IllegalStateException("Unknown tool: " + call.name()));
+            responses.add(new ToolResponseMessage.ToolResponse(call.id(), call.name(), callback.call(call.arguments())));
+        }
+        ToolResponseMessage toolResponseMessage = ToolResponseMessage.builder().responses(responses).build();
+        chatMemory.add(sessionId, assistant);
+        chatMemory.add(sessionId, toolResponseMessage);
+
         // 打印工具调用结果
         String result = toolResponseMessage.getResponses()
                 .stream()

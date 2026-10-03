@@ -17,7 +17,7 @@ public final class ToolApprovalSignal {
         if (responseData == null) {
             return false;
         }
-        // Spring AI stores a String tool result as JSON text in ToolResponseMessage.
+        // Legacy Spring AI records may contain JSON-quoted String tool results.
         // Direct calls/tests may still provide the unquoted representation.
         return responseData.startsWith(PREFIX) || responseData.startsWith("\"" + PREFIX);
     }

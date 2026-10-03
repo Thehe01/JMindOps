@@ -1,7 +1,7 @@
 package com.kama.jmindops.service;
 
 import org.junit.jupiter.api.Test;
-import org.springframework.ai.chat.messages.ToolResponseMessage;
+import com.kama.jmindops.ai.ToolResponseMessage;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.ArrayList;

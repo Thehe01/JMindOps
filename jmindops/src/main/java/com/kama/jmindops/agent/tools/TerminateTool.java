@@ -20,6 +20,6 @@ public class TerminateTool implements Tool {
         return ToolType.FIXED;
     }
 
-    @org.springframework.ai.tool.annotation.Tool(name = "terminate", description = "如果你觉得当前所有的任务已经执行完毕了，就执行这个工具调用")
+    @dev.langchain4j.agent.tool.Tool(name = "terminate", value = "如果你觉得当前所有的任务已经执行完毕了，就执行这个工具调用")
     public void terminate() {}
 }

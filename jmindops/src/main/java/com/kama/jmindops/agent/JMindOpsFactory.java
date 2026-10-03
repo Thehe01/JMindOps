@@ -23,10 +23,10 @@ import com.kama.jmindops.service.AgentTraceStore;
 import com.kama.jmindops.service.ToolFacadeService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.messages.*;
-import org.springframework.ai.tool.ToolCallback;
-import org.springframework.ai.tool.method.MethodToolCallbackProvider;
+import com.kama.jmindops.ai.ChatClient;
+import com.kama.jmindops.ai.*;
+import com.kama.jmindops.ai.ToolCallback;
+import com.kama.jmindops.ai.MethodToolCallbackProvider;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -254,7 +254,7 @@ public class JMindOpsFactory {
 
         // 2. 如果决策需要外部工具交互，则挂载 MCP 外部工具
         if (decision == RoutingDecision.MCP && externalToolRegistry != null) {
-            for (org.springframework.ai.tool.ToolCallbackProvider provider : externalToolRegistry.providers()) {
+            for (com.kama.jmindops.ai.ToolCallbackProvider provider : externalToolRegistry.providers()) {
                 ToolCallback[] mcpCallbacks = provider.getToolCallbacks();
                 if (mcpCallbacks != null) {
                     List<ToolCallback> allowedCallbacks = Arrays.stream(mcpCallbacks)

@@ -4,8 +4,8 @@ import com.fasterxml.jackson.annotation.JsonValue;
 import lombok.Builder;
 import lombok.Data;
 import lombok.Getter;
-import org.springframework.ai.chat.messages.AssistantMessage;
-import org.springframework.ai.chat.messages.ToolResponseMessage;
+import com.kama.jmindops.ai.AssistantMessage;
+import com.kama.jmindops.ai.ToolResponseMessage;
 
 import java.time.LocalDateTime;
 import java.util.List;

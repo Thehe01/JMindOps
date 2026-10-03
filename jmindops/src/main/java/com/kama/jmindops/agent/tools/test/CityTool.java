@@ -21,7 +21,7 @@ public class CityTool implements Tool {
         return ToolType.OPTIONAL;
     }
 
-    @org.springframework.ai.tool.annotation.Tool(name = "getCity", description = "获取当前的城市")
+    @dev.langchain4j.agent.tool.Tool(name = "getCity", value = "获取当前的城市")
     public String getCity() {
         return "南京";
     }

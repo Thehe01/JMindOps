@@ -13,8 +13,8 @@ class MultiChatClientConfigConditionTest {
     @Test
     void cloudProviderRemainsAvailableWhenSelectorDefaultsToNone() {
         MockEnvironment environment = new MockEnvironment()
-                .withProperty("spring.ai.model.chat", "none")
-                .withProperty("spring.ai.deepseek.api-key", "configured");
+                .withProperty("app.ai.model.chat", "none")
+                .withProperty("app.ai.deepseek.api-key", "configured");
 
         assertThat(new MultiChatClientConfig.DeepSeekConfiguredCondition()
                 .matches(context(environment), null)).isTrue();
@@ -23,8 +23,8 @@ class MultiChatClientConfigConditionTest {
     @Test
     void explicitOllamaSelectionDisablesCloudProvidersAndEnablesOllama() {
         MockEnvironment environment = new MockEnvironment()
-                .withProperty("spring.ai.model.chat", "ollama")
-                .withProperty("spring.ai.deepseek.api-key", "configured");
+                .withProperty("app.ai.model.chat", "ollama")
+                .withProperty("app.ai.deepseek.api-key", "configured");
         ConditionContext context = context(environment);
 
         assertThat(new MultiChatClientConfig.DeepSeekConfiguredCondition().matches(context, null)).isFalse();
@@ -34,7 +34,7 @@ class MultiChatClientConfigConditionTest {
     @Test
     void ollamaIsOptIn() {
         MockEnvironment environment = new MockEnvironment()
-                .withProperty("spring.ai.model.chat", "none");
+                .withProperty("app.ai.model.chat", "none");
 
         assertThat(new MultiChatClientConfig.OllamaConfiguredCondition()
                 .matches(context(environment), null)).isFalse();

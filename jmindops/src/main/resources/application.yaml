@@ -44,46 +44,6 @@ spring:
           starttls:
             enable: true
             required: true
-  ai:
-    # 默认不自动注册本地 ChatModel；设置 SPRING_AI_MODEL_CHAT=ollama 后启用。
-    # 云模型仍按各自 API Key 动态注册，none 不会屏蔽它们。
-    model:
-      chat: ${SPRING_AI_MODEL_CHAT:none}
-      embedding: ${SPRING_AI_MODEL_EMBEDDING:none}
-    deepseek:
-      api-key: ${DEEPSEEK_API_KEY:}
-      base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
-      chat:
-        options:
-          model: ${DEEPSEEK_CHAT_MODEL:deepseek-chat}
-    zhipuai:
-      api-key: ${ZHIPUAI_API_KEY:}
-      base-url: ${ZHIPUAI_BASE_URL:https://open.bigmodel.cn/api/paas}
-      chat:
-        options:
-          model: glm-4.6
-    google:
-      genai:
-        api-key: ${GOOGLE_GENAI_API_KEY:}
-        chat:
-          options:
-            model: gemini-2.5
-    ollama:
-      base-url: ${OLLAMA_CHAT_BASE_URL:http://localhost:11434}
-      chat:
-        options:
-          model: ${OLLAMA_CHAT_MODEL:qwen2.5}
-    mcp:
-      client:
-        enabled: ${MCP_CLIENT_ENABLED:false}
-        stdio:
-          connections:
-            filesystem-mcp:
-              command: ${MCP_FILESYSTEM_COMMAND:npx}
-              args:
-                - "-y"
-                - "@modelcontextprotocol/server-filesystem"
-                - ${MCP_FILESYSTEM_ROOT:./data/mcp-workspace}
 
 mybatis:
   type-aliases-package: com.kama.jmindops.model.entity
@@ -119,6 +79,46 @@ rag:
     request-timeout-seconds: ${RAG_RERANKER_TIMEOUT_SECONDS:30}
 
 app:
+  ai:
+    # 本地聊天模型按 APP_AI_CHAT_PROVIDER=ollama 显式启用。
+    # 云模型仍按各自 API Key 动态注册，none 不会屏蔽它们。
+    model:
+      chat: ${APP_AI_CHAT_PROVIDER:${SPRING_AI_MODEL_CHAT:none}}
+    deepseek:
+      api-key: ${DEEPSEEK_API_KEY:}
+      base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com/v1}
+      chat:
+        options:
+          model: ${DEEPSEEK_CHAT_MODEL:deepseek-chat}
+    zhipuai:
+      api-key: ${ZHIPUAI_API_KEY:}
+      base-url: ${ZHIPUAI_BASE_URL:https://open.bigmodel.cn/api/paas/v4}
+      chat:
+        options:
+          model: ${ZHIPUAI_CHAT_MODEL:glm-4.6}
+    google:
+      genai:
+        api-key: ${GOOGLE_GENAI_API_KEY:}
+        chat:
+          options:
+            model: ${GOOGLE_GENAI_CHAT_MODEL:gemini-2.5-flash}
+    ollama:
+      base-url: ${OLLAMA_CHAT_BASE_URL:http://localhost:11434}
+      chat:
+        options:
+          model: ${OLLAMA_CHAT_MODEL:qwen2.5}
+    mcp:
+      client:
+        enabled: ${MCP_CLIENT_ENABLED:false}
+        stdio:
+          connections:
+            filesystem-mcp:
+              command: ${MCP_FILESYSTEM_COMMAND:npx}
+              args:
+                - "-y"
+                - "@modelcontextprotocol/server-filesystem"
+                - ${MCP_FILESYSTEM_ROOT:./data/mcp-workspace}
+
   agent:
     llm-stream-timeout-seconds: ${AGENT_LLM_STREAM_TIMEOUT_SECONDS:120}
   security:

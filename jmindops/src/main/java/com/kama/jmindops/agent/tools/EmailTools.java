@@ -44,9 +44,9 @@ public class EmailTools implements Tool {
      * @param content 邮件内容
      * @return 发送结果信息
      */
-    @org.springframework.ai.tool.annotation.Tool(
+    @dev.langchain4j.agent.tool.Tool(
             name = "sendEmail",
-            description = "发送邮件到指定的收件人。参数包括：to（收件人邮箱地址，必填）、subject（邮件主题，必填）、content（邮件正文内容，必填）。邮件采用异步方式发送，工具调用会立即返回，实际发送在后台执行。"
+            value = "发送邮件到指定的收件人。参数包括：to（收件人邮箱地址，必填）、subject（邮件主题，必填）、content（邮件正文内容，必填）。邮件采用异步方式发送，工具调用会立即返回，实际发送在后台执行。"
     )
     @RequiresToolApproval
     public String sendEmail(String to, String subject, String content) {

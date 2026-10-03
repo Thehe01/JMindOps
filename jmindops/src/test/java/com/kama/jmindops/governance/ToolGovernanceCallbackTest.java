@@ -2,9 +2,9 @@ package com.kama.jmindops.governance;
 
 import com.kama.jmindops.agent.tools.DataBaseTools;
 import org.junit.jupiter.api.Test;
-import org.springframework.ai.tool.ToolCallback;
-import org.springframework.ai.tool.definition.ToolDefinition;
-import org.springframework.ai.tool.method.MethodToolCallbackProvider;
+import com.kama.jmindops.ai.ToolCallback;
+import com.kama.jmindops.ai.ToolDefinition;
+import com.kama.jmindops.ai.MethodToolCallbackProvider;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -19,7 +19,7 @@ import static org.mockito.Mockito.when;
 class ToolGovernanceCallbackTest {
 
     @Test
-    void blocksSpringAiCallbackBeforeDatabaseMethodRuns() {
+    void blocksLangChain4jCallbackBeforeDatabaseMethodRuns() {
         JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
         DataBaseTools tool = new DataBaseTools(jdbcTemplate);
         ToolCallback rawCallback = MethodToolCallbackProvider.builder()

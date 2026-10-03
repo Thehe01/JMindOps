@@ -1,7 +1,7 @@
 package com.kama.jmindops.event;
 
-import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.chat.metadata.Usage;
+import com.kama.jmindops.ai.Message;
+import com.kama.jmindops.ai.Usage;
 import org.springframework.context.ApplicationEvent;
 
 public class AgentMessageGeneratedEvent extends ApplicationEvent {

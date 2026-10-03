@@ -1,10 +1,9 @@
 package com.kama.jmindops.governance;
 
-import org.springframework.ai.chat.model.ToolContext;
-import org.springframework.ai.tool.ToolCallback;
-import org.springframework.ai.tool.annotation.Tool;
-import org.springframework.ai.tool.definition.ToolDefinition;
-import org.springframework.ai.tool.metadata.ToolMetadata;
+import com.kama.jmindops.ai.ToolContext;
+import com.kama.jmindops.ai.ToolCallback;
+import dev.langchain4j.agent.tool.Tool;
+import com.kama.jmindops.ai.ToolDefinition;
 import org.springframework.aop.support.AopUtils;
 import org.springframework.core.annotation.AnnotatedElementUtils;
 import org.springframework.util.ReflectionUtils;
@@ -15,8 +14,8 @@ import java.util.Objects;
 import java.util.function.Supplier;
 
 /**
- * Enforces approval at Spring AI's actual callback boundary. Method-level AOP
- * alone is insufficient because MethodToolCallback reflects a method discovered
+ * Enforces approval at the application callback boundary. Method-level AOP
+ * alone is insufficient because The LangChain4j executor invokes a method discovered
  * from the ultimate target class onto a possibly layered proxy.
  */
 public final class ToolGovernanceCallback implements ToolCallback {
@@ -83,11 +82,6 @@ public final class ToolGovernanceCallback implements ToolCallback {
     @Override
     public ToolDefinition getToolDefinition() {
         return delegate.getToolDefinition();
-    }
-
-    @Override
-    public ToolMetadata getToolMetadata() {
-        return delegate.getToolMetadata();
     }
 
     @Override

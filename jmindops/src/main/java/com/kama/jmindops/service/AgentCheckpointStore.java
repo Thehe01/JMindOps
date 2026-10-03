@@ -4,7 +4,7 @@ import com.kama.jmindops.exception.StaleGenerationLeaseException;
 import com.kama.jmindops.model.entity.AgentCheckpoint;
 import com.kama.jmindops.model.entity.AgentToolExecution;
 import com.kama.jmindops.model.entity.GenerationTask;
-import org.springframework.ai.chat.messages.AssistantMessage;
+import com.kama.jmindops.ai.AssistantMessage;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Service;

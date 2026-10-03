@@ -36,9 +36,9 @@ public class KnowledgeTools implements Tool {
         return ToolType.FIXED;
     }
 
-    @org.springframework.ai.tool.annotation.Tool(
+    @dev.langchain4j.agent.tool.Tool(
             name = "KnowledgeTool",
-            description = "从指定知识库中执行相似性检索（RAG）。参数为知识库 ID（kbsId）和查询文本（query），返回与查询最相关的知识片段。"
+            value = "从指定知识库中执行相似性检索（RAG）。参数为知识库 ID（kbsId）和查询文本（query），返回与查询最相关的知识片段。"
     )
     public String knowledgeQuery(String kbsId, String query) {
         if (!StringUtils.hasText(kbsId) || !StringUtils.hasText(query)) {
